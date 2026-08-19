@@ -75,6 +75,7 @@ function displayLabelParts(displayLabel: string): {
 function vendorLabelOf(account: AccountSummary): string {
   if (
     account.provider === "omp" ||
+    account.provider === "gjc" ||
     account.provider === "opencode" ||
     account.provider === "fuelGauge"
   ) {
@@ -83,20 +84,22 @@ function vendorLabelOf(account: AccountSummary): string {
   return PROVIDER_LABELS[account.provider];
 }
 /**
- * omp provider ids folded onto the native vendor they bill against.
+ * Agent-internal provider ids folded onto the native vendor they bill against.
  * Unknown ids keep their own namespace so new agents never collide.
  */
-const OMP_VENDOR_KEYS: Record<string, string> = {
+const AGENT_VENDOR_KEYS: Record<string, string> = {
   "openai-codex": "codex",
   "openai-codex-device": "codex",
   zai: "zai",
   "zai-coding-plan": "zai",
   "zhipu-coding-plan": "zai",
   "xai-oauth": "xai",
+  "grok-build": "xai",
   xai: "xai",
   "google-antigravity": "antigravity",
   "google-gemini-cli": "gemini",
   "github-copilot": "githubCopilot",
+  cursor: "cursor",
   anthropic: "claude",
   "opencode-go": "opencode-go",
 };
@@ -129,7 +132,11 @@ function vendorKeyOf(account: AccountSummary): string {
   switch (account.provider) {
     case "omp":
       return (
-        OMP_VENDOR_KEYS[account.ompProviderId] ?? `omp.${account.ompProviderId}`
+        AGENT_VENDOR_KEYS[account.ompProviderId] ?? `omp.${account.ompProviderId}`
+      );
+    case "gjc":
+      return (
+        AGENT_VENDOR_KEYS[account.gjcProviderId] ?? `gjc.${account.gjcProviderId}`
       );
     case "opencode":
       return (
@@ -159,6 +166,7 @@ function identityLabelOf(account: AccountSummary): string {
     case "cursor":
       return account.email ?? account.authId ?? account.id;
     case "omp":
+    case "gjc":
     case "opencode":
     case "fuelGauge":
       return displayLabelParts(account.displayLabel).tail;

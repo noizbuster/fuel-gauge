@@ -119,6 +119,8 @@ export function accountDisplayLabel(account: AccountSummary): string {
       // Agent-managed accounts carry their underlying provider inside
       // displayLabel; the prefix names the managing agent.
       return `Oh My Pi · ${account.displayLabel}`;
+    case "gjc":
+      return `gjc · ${account.displayLabel}`;
     case "opencode":
       return `OpenCode · ${account.displayLabel}`;
     case "fuelGauge":

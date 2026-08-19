@@ -11,6 +11,7 @@ Fuel Gauge is an interactive terminal dashboard for monitoring AI coding-service
 - Kiro
 - Cursor
 - Oh My Pi
+- gjc
 - OpenCode
 - FuelGauge API-key sources
 

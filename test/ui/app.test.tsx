@@ -140,6 +140,7 @@ function makeRegistry(log: AdapterLog, fake: FakeOptions): ProviderRegistry {
     "kiro",
     "cursor",
     "omp",
+    "gjc",
     "opencode",
     "fuelGauge",
   ] as const) {
@@ -569,13 +570,13 @@ test("sources tab lists empty providers in a trailing no-accounts block", async 
     // predate the resize or the startup refresh, transiently squeezing
     // the no-accounts block out of the frame.
     const frame = await harness.waitForFrame(
-      "no accounts · 8 sources",
+      "no accounts · 9 sources",
       "the settled sources tab",
     );
     assert.ok(frame.includes("[Sources]"), "sources tab reached");
     assert.ok(frame.includes("codex-2"), "the only populated block renders");
     assert.ok(
-      frame.includes("no accounts · 8 sources"),
+      frame.includes("no accounts · 9 sources"),
       "the no-accounts header counts every empty source",
     );
     for (const label of [
@@ -585,6 +586,7 @@ test("sources tab lists empty providers in a trailing no-accounts block", async 
       "Kiro",
       "Cursor",
       "Oh My Pi",
+      "gjc",
       "OpenCode",
       "FuelGauge",
     ]) {
@@ -618,7 +620,7 @@ test("sources tab orders cards by registered account count", async () => {
     },
     async (harness) => {
       harness.write(TAB);
-      await harness.resize(100, 40);
+      await harness.resize(100, 48);
       // The settled marker needs both the codex refresh (its second
       // account) and every seeded source card visible at once — a
       // mid-refresh frame can satisfy [Sources]+codex-2 while the
@@ -630,7 +632,7 @@ test("sources tab orders cards by registered account count", async () => {
           frame.includes("[Sources]") &&
           frame.includes("codex-2") &&
           frame.includes("Antigravity") &&
-          frame.includes("no accounts · 3")
+          frame.includes("no accounts · 4")
         ) {
           break;
         }
@@ -647,7 +649,7 @@ test("sources tab orders cards by registered account count", async () => {
       // Equal-count sources that were never seeded sit in the trailing
       // no-accounts block.
       assert.ok(
-        frame.indexOf("Antigravity") < frame.indexOf("no accounts · 3"),
+        frame.indexOf("Antigravity") < frame.indexOf("no accounts · 4"),
         "the no-accounts block sits below every source block",
       );
     },
@@ -694,7 +696,7 @@ test("selecting a no-accounts row marks it; Enter still opens details", async ()
     // startup selection snap targets the populated source, and pressing
     // j mid-transition can advance off a half-rendered list.
     await harness.waitForFrame(
-      "no accounts · 8 sources",
+      "no accounts · 9 sources",
       "the settled sources tab",
     );
     harness.write("j");
@@ -703,7 +705,7 @@ test("selecting a no-accounts row marks it; Enter still opens details", async ()
       "the selected no-accounts row",
     );
     assert.ok(
-      frame.includes("no accounts · 8 sources"),
+      frame.includes("no accounts · 9 sources"),
       "the no-accounts block keeps every source listed",
     );
     assert.ok(
@@ -848,6 +850,7 @@ test("auth tab adds an xAI account via the OpenCode import", async () => {
     "kiro",
     "cursor",
     "omp",
+    "gjc",
     "opencode",
     "fuelGauge",
   ] as const) {
@@ -1541,12 +1544,12 @@ test("startup completes and no bell rings during the silent baseline", async () 
 test("layout adapts live: tall list, narrow stack, short compact selection", async () => {
   await withApp({}, async (harness) => {
     harness.write(TAB);
-    await harness.resize(100, 40);
+    await harness.resize(100, 42);
     // Wide AND tall: the full list plus the no-accounts block render.
     // Poll for the settle marker: early paints can predate the tab
     // switch or the startup refresh, transiently squeezing the block.
     let frame = await harness.waitForFrame(
-      "no accounts · 8 sources",
+      "no accounts · 9 sources",
       "the wide settled sources tab",
     );
     assert.ok(
@@ -1555,19 +1558,19 @@ test("layout adapts live: tall list, narrow stack, short compact selection", asy
     );
     assert.ok(frame.includes("Cursor"), "rows render at wide sizes");
 
-    // 80x24 (narrow): single column. Only codex is populated; the eight
+    // 80x24 (narrow): single column. Only codex is populated; the nine
     // empty sources sit in the trailing no-accounts block.
     await harness.resize(80, 24);
     // The narrow frame renders identical text when everything fits, so
     // re-await the marker: it holds under the narrower budget, and the
     // poll collapses instantly when the layout did not change.
     frame = await harness.waitForFrame(
-      "no accounts · 8 sources",
+      "no accounts · 9 sources",
       "the narrow settled sources tab",
     );
     assert.ok(frame.includes("Codex"), "populated block stays");
     assert.ok(
-      frame.includes("no accounts · 8 sources"),
+      frame.includes("no accounts · 9 sources"),
       "the no-accounts block carries the empty sources",
     );
     assert.ok(
@@ -1874,7 +1877,8 @@ test("compact short view shows the selected source's accounts", async () => {
 test("j moves down and k moves up in the sources tab", async () => {
   await withApp({ seedAllProviders: true }, async (harness) => {
     harness.write(TAB);
-    await new Promise((r) => setTimeout(r, 120));
+    await harness.resize(100, 48);
+    await harness.waitForFrame("GitHub Copilot", "the settled sources tab");
     let frame = harness.frame();
     // Equal account counts keep the canonical card order; the selection
     // no longer hoists its card, so the order is stable navigation.
@@ -2108,6 +2112,15 @@ function displayFieldsFor(
         displayLabel: id,
         email: null,
       };
+    case "gjc":
+      return {
+        gjcProviderId: "zai",
+        credentialKind: "oauth" as const,
+        credentialSource: "stored" as const,
+        displayLabel: id,
+        email: null,
+        identityLabel: null,
+      };
     case "opencode":
       return {
         openCodeProviderId: "zai-coding-plan",
@@ -2158,6 +2171,7 @@ test("orderSourcesByAccounts sorts by account count and folds empties to the tai
     "claude",
     "kiro",
     "omp",
+    "gjc",
     "opencode",
   ]);
 });

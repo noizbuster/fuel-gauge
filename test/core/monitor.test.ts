@@ -226,6 +226,7 @@ function fakeAdapters(
     "kiro",
     "cursor",
     "omp",
+    "gjc",
     "opencode",
     "fuelGauge",
   ] as const) {
@@ -984,6 +985,7 @@ test("startup auto-imports every discovered account, claude included", async () 
     "kiro",
     "cursor",
     "omp",
+    "gjc",
     "opencode",
     "fuelGauge",
   ] as const) {
@@ -1012,6 +1014,7 @@ test("startup auto-imports every discovered account, claude included", async () 
       "kiro",
       "cursor",
       "omp",
+      "gjc",
       "opencode",
       "fuelGauge",
     ]);

@@ -26,6 +26,7 @@ export const PROVIDER_ORDER = [
   "kiro",
   "cursor",
   "omp",
+  "gjc",
   "opencode",
   "fuelGauge",
 ] as const;
@@ -41,6 +42,7 @@ export const PROVIDER_LABELS = {
   kiro: "Kiro",
   cursor: "Cursor",
   omp: "Oh My Pi",
+  gjc: "gjc",
   opencode: "OpenCode",
   fuelGauge: "FuelGauge",
 } as const satisfies Record<ProviderId, string>;
@@ -349,8 +351,8 @@ export interface OmpUsageLimit {
 
 /**
  * omp (Oh My Pi) account. omp keeps every credential inside its own
- * vault, so this is the one stored variant that never carries tokens:
- * refresh always re-asks the local `omp` CLI.
+ * vault, so this stored variant never carries tokens: refresh always
+ * re-asks the local `omp` CLI.
  */
 export interface StoredOmpAccount extends StoredAccountBase {
   provider: "omp";
@@ -369,6 +371,29 @@ export interface StoredOmpAccount extends StoredAccountBase {
 
   /** md5 of the api key for identity-less api-key accounts; else `null`. */
   keyFingerprint: string | null;
+}
+
+export type GjcCredentialKind = "oauth" | "api_key";
+export type GjcCredentialSource = "stored" | "env" | "config" | "runtime";
+
+/**
+ * Gajae Code account. GJC owns every credential and exposes a redacted
+ * inventory through `gjc accounts`; Fuel Gauge stores identity and quota only.
+ */
+export interface StoredGjcAccount extends StoredAccountBase {
+  provider: "gjc";
+  /** GJC-internal provider id, e.g. `"anthropic"` or `"openai-codex"`. */
+  gjcProviderId: string;
+  /** Stable, non-secret row id from GJC's account inventory. */
+  sourceId: string;
+  credentialKind: GjcCredentialKind;
+  credentialSource: GjcCredentialSource;
+  /** Display snapshot from import time, e.g. `"ChatGPT Codex · me@x.y"`. */
+  displayLabel: string;
+  email: string | null;
+  /** Safe GJC identity label: email, account id, or project id. */
+  identityLabel: string | null;
+  limits: OmpUsageLimit[];
 }
 
 /**
@@ -441,6 +466,7 @@ export type StoredAccount =
   | StoredKiroAccount
   | StoredCursorAccount
   | StoredOmpAccount
+  | StoredGjcAccount
   | StoredOpenCodeAccount
   | StoredFuelGaugeAccount;
 
@@ -548,6 +574,16 @@ export interface OmpAccountSummary extends AccountSummaryBase {
   keyFingerprint: string | null;
 }
 
+export interface GjcAccountSummary extends AccountSummaryBase {
+  provider: "gjc";
+  gjcProviderId: string;
+  /** Display snapshot from import time, e.g. `"ChatGPT Codex · me@x.y"`. */
+  displayLabel: string;
+  email: string | null;
+  /** Safe GJC identity label: email, account id, or project id. */
+  identityLabel: string | null;
+}
+
 export interface OpenCodeAccountSummary extends AccountSummaryBase {
   provider: "opencode";
   openCodeProviderId: string;
@@ -582,6 +618,7 @@ export type AccountSummary =
   | KiroAccountSummary
   | CursorAccountSummary
   | OmpAccountSummary
+  | GjcAccountSummary
   | OpenCodeAccountSummary
   | FuelGaugeAccountSummary;
 

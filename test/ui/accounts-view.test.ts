@@ -73,6 +73,18 @@ function summary(seed: AccountSeed): AccountSummary {
       displayLabel: seed.displayLabel ?? "OpenCode · test",
     } as AccountSummary;
   }
+  if (seed.provider === "gjc") {
+    return {
+      ...base,
+      provider: "gjc",
+      gjcProviderId: seed.id,
+      credentialKind: "oauth",
+      credentialSource: "stored",
+      displayLabel: seed.displayLabel ?? `GJC · ${seed.email ?? seed.id}`,
+      email: seed.email ?? null,
+      identityLabel: seed.email ?? null,
+    } as AccountSummary;
+  }
   return {
     ...base,
     provider: seed.provider,
@@ -99,6 +111,36 @@ test("same email merges within one vendor across sources", () => {
   assert.equal(entries[0]?.identityLabel, "me@example.com");
   assert.equal(entries[0]?.title, "Codex (codex, omp) me@example.com");
   assert.equal(entries[0]?.accounts.length, 2);
+});
+
+test("same GJC identity merges with the native vendor", () => {
+  const entries = mergeAccountsByIdentity([
+    summary({ id: "a", provider: "codex", email: "Me@Example.com" }),
+    summary({
+      id: "openai-codex",
+      provider: "gjc",
+      email: "me@example.com",
+      displayLabel: "ChatGPT Codex · me@example.com",
+    }),
+  ]);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]?.vendorLabel, "Codex");
+  assert.equal(entries[0]?.sourcesLabel, "codex, gjc");
+  assert.equal(entries[0]?.identityLabel, "me@example.com");
+});
+
+test("same Cursor identity merges across native and GJC sources", () => {
+  const entries = mergeAccountsByIdentity([
+    summary({ id: "native", provider: "cursor", email: "me@example.com" }),
+    summary({
+      id: "cursor",
+      provider: "gjc",
+      email: "me@example.com",
+      displayLabel: "Cursor · me@example.com",
+    }),
+  ]);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]?.sourcesLabel, "cursor, gjc");
 });
 
 test("duplicate (provider, id) inputs collapse into one member", () => {

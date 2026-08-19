@@ -6,7 +6,7 @@ grounded in the current code and configuration.
 ## What this is
 
 Fuel Gauge is a terminal (Ink/React) dashboard that monitors AI coding
-service quotas across nine providers. Node.js ≥ 26.4, TypeScript 7
+service quotas across ten providers. Node.js ≥ 26.4, TypeScript 7
 (native), ESM only (`"type": "module"`). Single binary-style CLI in
 `src/cli.tsx`; no server.
 

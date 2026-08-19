@@ -134,6 +134,14 @@ export function ompAccountId(
   return `omp_${md5Hex(`${ompProviderId.trim()}:${accountKey.trim()}`)}`;
 }
 
+/** `gjc_` + md5 of `{GJC provider id}:{safe inventory row id}`. */
+export function gjcAccountId(
+  gjcProviderId: string,
+  sourceId: string,
+): string {
+  return `gjc_${md5Hex(`${gjcProviderId.trim()}:${sourceId.trim()}`)}`;
+}
+
 /** `oc_` + md5 of the opencode provider id, trimmed. */
 export function opencodeAccountId(openCodeProviderId: string): string {
   return `oc_${md5Hex(openCodeProviderId.trim())}`;

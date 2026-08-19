@@ -12,6 +12,7 @@ import { createClaudeProvider } from "./claude.js";
 import { createCodexProvider } from "./codex.js";
 import { createCursorProvider } from "./cursor.js";
 import { createFuelGaugeProvider } from "./fuel-gauge.js";
+import { createGjcProvider } from "./gjc.js";
 import { createGitHubCopilotProvider } from "./github-copilot.js";
 import { createKiroProvider } from "./kiro.js";
 import { createOmpProvider } from "./omp.js";
@@ -29,6 +30,7 @@ export function createProviderRegistry(
     kiro: createKiroProvider(deps),
     cursor: createCursorProvider(deps),
     omp: createOmpProvider(deps),
+    gjc: createGjcProvider(deps),
     opencode: createOpenCodeProvider(deps),
     fuelGauge: createFuelGaugeProvider(deps),
   } satisfies ProviderRegistry;

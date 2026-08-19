@@ -46,6 +46,9 @@ import type {
   CursorAccountSummary,
   FuelGaugeAccountSummary,
   FuelGaugeVendorId,
+  GjcAccountSummary,
+  GjcCredentialKind,
+  GjcCredentialSource,
   GitHubCopilotAccountSummary,
   GitHubCopilotUsageSummary,
   KiroAccountSummary,
@@ -63,6 +66,7 @@ import type {
   StoredCodexTokens,
   StoredCursorAccount,
   StoredFuelGaugeAccount,
+  StoredGjcAccount,
   StoredGitHubCopilotAccount,
   StoredKiroAccount,
   StoredOmpAccount,
@@ -248,6 +252,31 @@ function expectOpenCodeAuthType(
 ): "api" | "oauth" {
   if (value === "api" || value === "oauth") return value;
   throw new InvalidShapeError(`${where} must be "api" or "oauth"`);
+}
+
+function expectGjcCredentialKind(
+  value: unknown,
+  where: string,
+): GjcCredentialKind {
+  if (value === "oauth" || value === "api_key") return value;
+  throw new InvalidShapeError(`${where} must be "oauth" or "api_key"`);
+}
+
+function expectGjcCredentialSource(
+  value: unknown,
+  where: string,
+): GjcCredentialSource {
+  if (
+    value === "stored" ||
+    value === "env" ||
+    value === "config" ||
+    value === "runtime"
+  ) {
+    return value;
+  }
+  throw new InvalidShapeError(
+    `${where} must be "stored", "env", "config", or "runtime"`,
+  );
 }
 
 function expectFuelGaugeVendor(
@@ -832,6 +861,32 @@ export function validateStoredAccount(
         limits: validateOmpLimits(record.limits, "account.limits"),
       } satisfies StoredOmpAccount;
 
+    case "gjc":
+      return {
+        ...base,
+        provider,
+        gjcProviderId: expectString(
+          record.gjcProviderId,
+          "account.gjcProviderId",
+        ),
+        sourceId: expectString(record.sourceId, "account.sourceId"),
+        credentialKind: expectGjcCredentialKind(
+          record.credentialKind,
+          "account.credentialKind",
+        ),
+        credentialSource: expectGjcCredentialSource(
+          record.credentialSource,
+          "account.credentialSource",
+        ),
+        displayLabel: expectString(record.displayLabel, "account.displayLabel"),
+        email: expectNullableString(record.email, "account.email"),
+        identityLabel: expectNullableString(
+          record.identityLabel,
+          "account.identityLabel",
+        ),
+        limits: validateOmpLimits(record.limits, "account.limits"),
+      } satisfies StoredGjcAccount;
+
     case "opencode":
       return {
         ...base,
@@ -1362,28 +1417,8 @@ export function deriveQuotaMetrics(account: StoredAccount): QuotaMetric[] {
         ),
       ];
     case "omp":
-      return account.limits.map((limit) =>
-        metric(
-          limit.id,
-          ompMetricLabel(limit),
-          clampMetricPercent(limit.remainingPercent),
-          limit.used,
-          limit.total,
-          limit.resetAt,
-        ),
-      );
+    case "gjc":
     case "opencode":
-      return account.limits.map((limit) =>
-        metric(
-          limit.id,
-          ompMetricLabel(limit),
-          clampMetricPercent(limit.remainingPercent),
-          limit.used,
-          limit.total,
-          limit.resetAt,
-        ),
-      );
-
     case "fuelGauge":
       return account.limits.map((limit) =>
         metric(
@@ -1636,6 +1671,17 @@ export function storedAccountToSummary(account: StoredAccount): AccountSummary {
       };
       return finalizeSummary(summary, account);
     }
+    case "gjc": {
+      const summary: GjcAccountSummary = {
+        ...base,
+        provider: "gjc",
+        gjcProviderId: account.gjcProviderId,
+        displayLabel: account.displayLabel,
+        email: account.email,
+        identityLabel: account.identityLabel,
+      };
+      return finalizeSummary(summary, account);
+    }
     case "opencode": {
       const summary: OpenCodeAccountSummary = {
         ...base,
@@ -1793,6 +1839,14 @@ function mergeExistingAccount(
     }
     case "omp": {
       const prior = existing as StoredOmpAccount;
+      return {
+        ...merged,
+        limits: merged.limits.length > 0 ? merged.limits : prior.limits,
+        usageUpdatedAt: merged.usageUpdatedAt ?? prior.usageUpdatedAt,
+      };
+    }
+    case "gjc": {
+      const prior = existing as StoredGjcAccount;
       return {
         ...merged,
         limits: merged.limits.length > 0 ? merged.limits : prior.limits,

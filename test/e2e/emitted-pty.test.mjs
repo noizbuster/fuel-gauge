@@ -227,6 +227,7 @@ const SUMMARIES = {
   kiro: () => [kiroSummary()],
   cursor: () => [cursorSummary()],
   omp: () => [ompSummary()],
+  gjc: () => [gjcSummary()],
   opencode: () => [opencodeSummary()],
   fuelGauge: () => [fuelGaugeSummary()],
 };
@@ -261,6 +262,20 @@ function ompSummary() {
     displayLabel: "Z.AI (GLM) · account 1",
     email: null,
     metrics: [metric("zai:tokens:5h", "ZAI 5 Hours Token Quota", 87)],
+  };
+}
+
+function gjcSummary() {
+  return {
+    ...baseSummaryFields("gjc-1"),
+    provider: "gjc",
+    gjcProviderId: "openai-codex",
+    credentialKind: "oauth",
+    credentialSource: "stored",
+    displayLabel: "ChatGPT Codex · gjc@example.com",
+    email: "gjc@example.com",
+    identityLabel: "gjc@example.com",
+    metrics: [metric("gjc.codex.primary", "5 hours", 82)],
   };
 }
 
@@ -435,6 +450,29 @@ async function seedStore(runtime, providers) {
           remainingPercent: 87,
           used: null,
           total: null,
+          resetAt: null,
+        },
+      ],
+    },
+    gjc: {
+      ...base,
+      provider: "gjc",
+      id: "gjc-1",
+      gjcProviderId: "openai-codex",
+      sourceId: "openai-codex:stored:7",
+      credentialKind: "oauth",
+      credentialSource: "stored",
+      displayLabel: "ChatGPT Codex · gjc@example.com",
+      email: "gjc@example.com",
+      identityLabel: "gjc@example.com",
+      limits: [
+        {
+          id: "gjc.codex.primary",
+          label: "5 hours",
+          windowLabel: "5 hours",
+          remainingPercent: 82,
+          used: 18,
+          total: 100,
           resetAt: null,
         },
       ],
@@ -833,6 +871,7 @@ test("height budget keeps the dashboard inside the viewport; labels survive ever
       kiro: "kiro@example.com",
       cursor: "cursor@example.com",
       omp: "Z.AI (GLM) · account 1",
+      gjc: "ChatGPT Codex · gjc@example.com",
       // Inside a source's block the agent prefix is stripped — the box
       // already names the source.
       opencode: "Z.AI Coding Plan · API key",

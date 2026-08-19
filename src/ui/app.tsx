@@ -629,6 +629,7 @@ function ProviderCard({
 function sourceAccountLabel(account: AccountSummary): string {
   if (
     account.provider === "omp" ||
+    account.provider === "gjc" ||
     account.provider === "opencode" ||
     account.provider === "fuelGauge"
   ) {
@@ -2164,7 +2165,9 @@ export function App({
           // provider accounts get the provider label prefixed so every
           // row is distinguishable at a glance.
           label:
-            account.provider === "omp" || account.provider === "opencode"
+            account.provider === "omp" ||
+            account.provider === "gjc" ||
+            account.provider === "opencode"
               ? accountDisplayLabel(account)
               : `${PROVIDER_LABELS[account.provider]} · ${accountDisplayLabel(
                   account,
