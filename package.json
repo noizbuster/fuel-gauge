@@ -1,0 +1,61 @@
+{
+  "name": "fuel-gauge",
+  "version": "0.1.1",
+  "description": "Terminal dashboard for AI coding-service quotas: nine providers, one screen.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/noizbuster/fuel-gauge.git"
+  },
+  "keywords": [
+    "cli",
+    "tui",
+    "quota",
+    "usage",
+    "monitor",
+    "codex",
+    "claude",
+    "copilot",
+    "cursor"
+  ],
+  "engines": {
+    "node": ">=26.4.0"
+  },
+  "bin": {
+    "fuel-gauge": "dist/cli.js",
+    "fgg": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES"
+  ],
+  "scripts": {
+    "dev": "node --watch --import=tsx src/cli.tsx",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "check": "biome check .",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "node --import=tsx --test \"test/**/*.test.ts\" \"test/**/*.test.tsx\"",
+    "test:random": "node --import=tsx --test --test-randomize \"test/**/*.test.ts\" \"test/**/*.test.tsx\"",
+    "test:dist": "node --test test/e2e/emitted-pty.test.mjs",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm test && npm run build"
+  },
+  "dependencies": {
+    "@inkjs/ui": "2.0.0",
+    "ink": "7.1.1",
+    "open": "11.0.1",
+    "react": "19.2.8"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.8",
+    "@types/node": "26.2.0",
+    "@types/react": "19.2.18",
+    "ink-testing-library": "4.0.0",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2"
+  }
+}
