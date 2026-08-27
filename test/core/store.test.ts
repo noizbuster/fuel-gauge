@@ -15,6 +15,8 @@ import {
   type CredentialStore,
   createCredentialStore,
   DEFAULT_SETTINGS,
+  deriveQuotaMetrics,
+  quotaWindowLabel,
   StoreError,
 } from "../../src/core/store.js";
 import type {
@@ -24,6 +26,7 @@ import type {
   StoredAccount,
   StoredAntigravityAccount,
   StoredClaudeAccount,
+  StoredCodexAccount,
   StoredCursorAccount,
   StoredGitHubCopilotAccount,
   StoredKiroAccount,
@@ -630,4 +633,98 @@ test("loadUserAddedAccountIds backfills the first-run burst once, then stays exa
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("quotaWindowLabel derives canonical duration labels from window data", () => {
+  assert.equal(quotaWindowLabel(300, "Primary usage"), "5 hours");
+  assert.equal(quotaWindowLabel(60, "Primary usage"), "1 hour");
+  assert.equal(quotaWindowLabel(10_080, "Primary usage"), "7 days");
+  assert.equal(quotaWindowLabel(1_440, "Weekly usage"), "1 day");
+  assert.equal(quotaWindowLabel(90, "Primary usage"), "90 min");
+  assert.equal(quotaWindowLabel(null, "Primary usage"), "Primary usage");
+  assert.equal(quotaWindowLabel(0, "Weekly usage"), "Weekly usage");
+});
+
+test("codex metrics use duration labels shared with sibling adapters", () => {
+  const sparkPlan = deriveQuotaMetrics({
+    ...base(),
+    provider: "codex",
+    email: "codex@example.com",
+    authMode: "oauth",
+    openAIApiKey: null,
+    apiBaseUrl: null,
+    userId: null,
+    plan: "spark",
+    accountId: null,
+    organizationId: null,
+    tokens: null,
+    quota: {
+      hourlyRemainingPercent: 8,
+      hourlyResetAt: 9_000,
+      hourlyWindowMinutes: 10_080,
+      weeklyRemainingPercent: null,
+      weeklyResetAt: null,
+      weeklyWindowMinutes: null,
+    },
+  } satisfies StoredCodexAccount);
+  // A 168h primary renders exactly like omp's "7 days" row, so the
+  // per-label merge collapses them into one dashboard row.
+  assert.deepEqual(
+    sparkPlan.map((metric) => metric.label),
+    ["7 days", "Weekly usage"],
+  );
+
+  const classicPlan = deriveQuotaMetrics({
+    ...base(),
+    provider: "codex",
+    email: "codex@example.com",
+    authMode: "oauth",
+    openAIApiKey: null,
+    apiBaseUrl: null,
+    userId: null,
+    plan: null,
+    accountId: null,
+    organizationId: null,
+    tokens: null,
+    quota: {
+      hourlyRemainingPercent: 40,
+      hourlyResetAt: 9_000,
+      hourlyWindowMinutes: 300,
+      weeklyRemainingPercent: 30,
+      weeklyResetAt: 99_000,
+      weeklyWindowMinutes: 10_080,
+    },
+  } satisfies StoredCodexAccount);
+  assert.deepEqual(
+    classicPlan.map((metric) => metric.label),
+    ["5 hours", "7 days"],
+  );
+
+  // Equal-length windows must never share a label: the merge would fold
+  // two distinct quotas into one row.
+  const twinWindows = deriveQuotaMetrics({
+    ...base(),
+    provider: "codex",
+    email: "codex@example.com",
+    authMode: "oauth",
+    openAIApiKey: null,
+    apiBaseUrl: null,
+    userId: null,
+    plan: null,
+    accountId: null,
+    organizationId: null,
+    tokens: null,
+    quota: {
+      hourlyRemainingPercent: 40,
+      hourlyResetAt: 9_000,
+      hourlyWindowMinutes: 10_080,
+      weeklyRemainingPercent: 30,
+      weeklyResetAt: 99_000,
+      weeklyWindowMinutes: 10_080,
+    },
+  } satisfies StoredCodexAccount);
+  assert.deepEqual(
+    twinWindows.map((metric) => metric.label),
+    ["7 days", "Weekly usage"],
+  );
 });

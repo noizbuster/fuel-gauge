@@ -31,26 +31,30 @@ fuel-gauge
 fgg
 ```
 
+To try Fuel Gauge without installing, run it with [`npx`](https://docs.npmjs.com/cli/v10/commands/npx) instead (see [Usage](#usage)).
+
 Fuel Gauge discovers compatible local credentials automatically. Use the **Auth** tab to import, add, remove, or reauthenticate accounts supported by each source.
 
 ## Usage
 
-Run Fuel Gauge in an interactive terminal:
+Run Fuel Gauge in an interactive terminal with [`npx`](https://docs.npmjs.com/cli/v10/commands/npx):
 
 ```sh
-fuel-gauge
+npx fuel-gauge
 ```
+
+This downloads and runs the package on demand — no global install required.
 
 When stdin or stdout is not a TTY, Fuel Gauge prints one cached, token-free snapshot without performing network requests or starting authentication flows:
 
 ```sh
-fuel-gauge | cat
+npx fuel-gauge | cat
 ```
 
 Clear cached accounts while preserving settings:
 
 ```sh
-fuel-gauge --clear-cache
+npx fuel-gauge --clear-cache
 ```
 
 The next interactive launch imports compatible local accounts again.

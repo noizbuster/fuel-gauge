@@ -1145,12 +1145,26 @@ function metric(
   return { id, label, remainingPercent, used, total, resetAt };
 }
 
-function codexPrimaryLabel(windowMinutes: number | null): string {
-  if (windowMinutes == null || windowMinutes <= 0) return "Primary usage";
-  const hours = windowMinutes / 60;
-  const duration =
-    hours >= 1 && Number.isInteger(hours) ? `${hours}h` : `${windowMinutes}m`;
-  return `Primary usage (${duration} window)`;
+/**
+ * Canonical quota-window label derived from the window's own length
+ * ("5 hours", "7 days"). Every adapter reading the same vendor window
+ * renders the same string, so per-label merge collapses duplicates.
+ * Falls back to the adapter's semantic name when the length is unknown.
+ */
+export function quotaWindowLabel(
+  windowMinutes: number | null,
+  fallback: string,
+): string {
+  if (windowMinutes == null || windowMinutes <= 0) return fallback;
+  if (windowMinutes % 1440 === 0) {
+    const days = windowMinutes / 1440;
+    return `${days} ${days === 1 ? "day" : "days"}`;
+  }
+  if (windowMinutes % 60 === 0) {
+    const hours = windowMinutes / 60;
+    return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+  }
+  return `${windowMinutes} min`;
 }
 
 /**
@@ -1190,11 +1204,24 @@ export function deriveQuotaMetrics(account: StoredAccount): QuotaMetric[] {
         ),
       ];
     }
-    case "codex":
+    case "codex": {
+      const primaryLabel = quotaWindowLabel(
+        account.quota.hourlyWindowMinutes,
+        "Primary usage",
+      );
+      const weeklyDerived = quotaWindowLabel(
+        account.quota.weeklyWindowMinutes,
+        "Weekly usage",
+      );
+      // Equal-length windows (e.g. two 7-day windows on one plan) would
+      // collide into one merged row downstream; the fallback keeps the
+      // two metrics distinguishable.
+      const weeklyLabel =
+        weeklyDerived === primaryLabel ? "Weekly usage" : weeklyDerived;
       return [
         metric(
           "codex.primary",
-          codexPrimaryLabel(account.quota.hourlyWindowMinutes),
+          primaryLabel,
           clampMetricPercent(account.quota.hourlyRemainingPercent),
           null,
           null,
@@ -1202,13 +1229,14 @@ export function deriveQuotaMetrics(account: StoredAccount): QuotaMetric[] {
         ),
         metric(
           "codex.weekly",
-          "Weekly usage",
+          weeklyLabel,
           clampMetricPercent(account.quota.weeklyRemainingPercent),
           null,
           null,
           account.quota.weeklyResetAt,
         ),
       ];
+    }
     case "antigravity":
       return [
         metric(

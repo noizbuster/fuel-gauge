@@ -244,8 +244,8 @@ test("opencode openai refresh parses subscription windows", async (t) => {
   assert.deepEqual(
     refreshed.metrics.map((metric) => [metric.label, metric.remainingPercent]),
     [
-      ["Primary usage", 60],
-      ["Weekly usage", 90],
+      ["3 hours", 60],
+      ["7 days", 90],
     ],
   );
 });

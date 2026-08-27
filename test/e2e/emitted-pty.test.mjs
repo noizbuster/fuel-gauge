@@ -103,7 +103,7 @@ function codexSummary(remainingPercent = 55, status = "active", statusReason = n
       weeklyWindowMinutes: null,
     },
     metrics: [
-      metric("codex.primary", "Primary usage (3h window)", remainingPercent),
+      metric("codex.primary", "3 hours", remainingPercent),
       metric("codex.weekly", "Weekly usage", 70),
     ],
   };
@@ -1356,7 +1356,7 @@ test("refresh failure keeps cached quota, redacts secrets, and shows reauth tran
     assert.ok(!screen.includes(token), "token never rendered");
     await harness.waitForFrame("55%", "cached quota retained");
     assert.ok(
-      harness.screen().includes("Primary usage (3h window)"),
+      harness.screen().includes("3 hours"),
       "cached label retained",
     );
     harness.key(ESC);

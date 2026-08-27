@@ -48,7 +48,7 @@ function codexSummary(id: string, remaining: number | null): AccountSummary {
     metrics: [
       {
         id: "codex.primary",
-        label: "Primary usage (180 min window)",
+        label: "3 hours",
         remainingPercent: remaining,
         used: null,
         total: null,
@@ -1641,7 +1641,7 @@ test("sources list fits the viewport and renders every account when tall", async
     ],
     codex: [
       summaryFor("codex", "codex-1", [
-        metric("codex.primary", "Primary usage (3h window)", 55, {
+        metric("codex.primary", "3 hours", 55, {
           resetAt: 1_800_000_000_000,
         }),
         metric("codex.weekly", "Weekly usage", 70),
@@ -2206,7 +2206,7 @@ test("accounts dashboard shows inline metric rows; Enter opens the detail modal"
     assert.ok(frame.includes("Accounts —"), "accounts view default");
     // Metric rows render for every entry without any selection.
     assert.ok(
-      frame.includes("Primary usage (180 min window)"),
+      frame.includes("3 hours"),
       "metric rows render inline without selection",
     );
     // Enter opens the account modal for the selected entry.

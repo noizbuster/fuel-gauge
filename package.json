@@ -1,6 +1,6 @@
 {
   "name": "fuel-gauge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Terminal dashboard for AI coding-service quotas: nine providers, one screen.",
   "type": "module",
   "license": "MIT",

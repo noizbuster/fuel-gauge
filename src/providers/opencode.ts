@@ -15,6 +15,7 @@ import path from "node:path";
 import { asRecord, recordString } from "../core/discovery.js";
 import { fetchWithTimeout } from "../core/http.js";
 import { md5Hex, opencodeAccountId } from "../core/ids.js";
+import { quotaWindowLabel } from "../core/store.js";
 import type {
   AccountSummary,
   ImportCandidate,
@@ -197,6 +198,13 @@ export function createOpenCodeProvider(
       const usedPercent = finiteOrNull(window.used_percent);
       const resetAt = finiteOrNull(window.reset_at);
       const resetAfterSeconds = finiteOrNull(window.reset_after_seconds);
+      const windowSeconds = finiteOrNull(window.limit_window_seconds);
+      // Same ceil-to-minutes rule as the codex adapter, so both adapters
+      // derive identical labels for the same vendor window.
+      const windowMinutes =
+        windowSeconds != null && windowSeconds > 0
+          ? Math.trunc((windowSeconds + 59) / 60)
+          : null;
       const windowResetAt =
         resetAt != null && resetAt > 0 && resetAt < 1e12
           ? resetAt * 1000
@@ -208,7 +216,7 @@ export function createOpenCodeProvider(
       return [
         {
           id: `opencode.openai.${id}`,
-          label,
+          label: quotaWindowLabel(windowMinutes, label),
           windowLabel: "",
           remainingPercent:
             usedPercent != null ? 100 - Math.min(100, usedPercent) : null,
