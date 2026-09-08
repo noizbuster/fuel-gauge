@@ -27,13 +27,13 @@ export interface MergedAccountEntry {
   readonly providers: readonly ProviderId[];
   /** Every member account, canonical provider order. */
   readonly accounts: readonly AccountSummary[];
-  /** Entry metric rows: per-label worst remaining, first-seen order. */
+  /** Entry metric rows: per-label worst fresh remaining, first-seen order. */
   readonly metricRows: readonly {
     readonly label: string;
     readonly remainingPercent: number | null;
     readonly resetAt: number | null;
   }[];
-  /** Worst remaining percent across members; null when none report. */
+  /** Worst remaining percent across fresh usage; null when none report. */
   readonly worstRemainingPercent: number | null;
   /** True when any member is not active or reports a quota error. */
   readonly needsAttention: boolean;
@@ -132,11 +132,13 @@ function vendorKeyOf(account: AccountSummary): string {
   switch (account.provider) {
     case "omp":
       return (
-        AGENT_VENDOR_KEYS[account.ompProviderId] ?? `omp.${account.ompProviderId}`
+        AGENT_VENDOR_KEYS[account.ompProviderId] ??
+        `omp.${account.ompProviderId}`
       );
     case "gjc":
       return (
-        AGENT_VENDOR_KEYS[account.gjcProviderId] ?? `gjc.${account.gjcProviderId}`
+        AGENT_VENDOR_KEYS[account.gjcProviderId] ??
+        `gjc.${account.gjcProviderId}`
       );
     case "opencode":
       return (
@@ -217,6 +219,30 @@ function mergeKeyOf(account: AccountSummary, index: number): string {
   return `account:${account.provider}:${account.id}:${index}`;
 }
 
+/** One default refresh interval; tolerate sources refreshing sequentially. */
+const MAX_USAGE_AGE_GAP_MS = 10 * 60 * 1000;
+
+function freshUsageAccounts(
+  accounts: readonly AccountSummary[],
+): readonly AccountSummary[] {
+  let newest: number | null = null;
+  for (const account of accounts) {
+    if (
+      account.usageUpdatedAt !== null &&
+      (newest === null || account.usageUpdatedAt > newest)
+    ) {
+      newest = account.usageUpdatedAt;
+    }
+  }
+  // Without a dated alternative, preserve the only available information.
+  if (newest === null) return accounts;
+  const cutoff = newest - MAX_USAGE_AGE_GAP_MS;
+  return accounts.filter(
+    (account) =>
+      account.usageUpdatedAt !== null && account.usageUpdatedAt >= cutoff,
+  );
+}
+
 /**
  * Groups every account by vendor-scoped identity: the same email or api
  * key merges only within one underlying vendor (see vendorKeyOf), so one
@@ -231,31 +257,36 @@ export function mergeAccountsByIdentity(
   // Callers flatten every provider's records into one list, and ids are
   // only unique PER PROVIDER — the same (provider, id) can appear twice
   // when sources overlap. A merged entry showing the same account twice
-  // is pure duplication (and duplicate React keys downstream), so the
-  // first occurrence wins.
-  const seen = new Set<string>();
-  const unique = accounts.filter((account) => {
+  // is pure duplication (and duplicate React keys downstream). Keep the
+  // newest usage snapshot, preserving the first occurrence on timestamp ties.
+  const unique = new Map<string, AccountSummary>();
+  for (const account of accounts) {
     const key = `${account.provider}:${account.id}`;
-    if (seen.has(key)) {
-      return false;
+    const previous = unique.get(key);
+    if (
+      previous === undefined ||
+      (account.usageUpdatedAt ?? -Infinity) >
+        (previous.usageUpdatedAt ?? -Infinity)
+    ) {
+      unique.set(key, account);
     }
-    seen.add(key);
-    return true;
-  });
+  }
   const groups = new Map<string, AccountSummary[]>();
-  unique.forEach((account, index) => {
-    const key = mergeKeyOf(account, index);
+  let index = 0;
+  for (const account of unique.values()) {
+    const key = mergeKeyOf(account, index++);
     const bucket = groups.get(key);
     if (bucket === undefined) {
       groups.set(key, [account]);
     } else {
       bucket.push(account);
     }
-  });
+  }
   const entries = [...groups.values()].map((members) => {
     const ordered = [...members].sort(
       (a, b) => providerRank(a.provider) - providerRank(b.provider),
     );
+    const usageAccounts = freshUsageAccounts(ordered);
     const first = ordered[0] as AccountSummary;
     const providers = [...new Set(ordered.map((account) => account.provider))];
     const vendorLabel = vendorLabelOf(first);
@@ -269,8 +300,8 @@ export function mergeAccountsByIdentity(
       title: `${vendorLabel} (${sourcesLabel}) ${identity}`,
       providers,
       accounts: ordered,
-      metricRows: mergedMetricRows(ordered),
-      worstRemainingPercent: worstRemaining(ordered),
+      metricRows: mergedMetricRows(usageAccounts),
+      worstRemainingPercent: worstRemaining(usageAccounts),
       needsAttention: ordered.some(
         (account) =>
           account.status !== "active" || account.quotaQueryLastError !== null,

@@ -46,6 +46,15 @@ npx fuel-gauge
 
 This downloads and runs the package on demand — no global install required.
 
+The Accounts tab merges matching identities within the same underlying provider.
+Usage snapshots more than 10 minutes older than that identity's newest
+`usageUpdatedAt` are excluded from merged quota bars and remaining percentages;
+snapshots within that window still use the lowest remaining percentage per label.
+Undated usage is excluded when a dated snapshot exists; otherwise it is retained.
+Original accounts and authentication errors remain available in account details.
+Duplicate records with the same source and account ID use the newest usage snapshot.
+This does not delete stored accounts or change the Sources tab or cached CLI output.
+
 When stdin or stdout is not a TTY, Fuel Gauge prints one cached, token-free snapshot without performing network requests or starting authentication flows:
 
 ```sh

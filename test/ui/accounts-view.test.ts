@@ -16,6 +16,7 @@ interface AccountSeed {
   remainingPercent?: number | null;
   resetAt?: number | null;
   status?: "active" | "requiresReauthentication";
+  usageUpdatedAt?: number | null;
 }
 
 function summary(seed: AccountSeed): AccountSummary {
@@ -25,7 +26,7 @@ function summary(seed: AccountSeed): AccountSummary {
     statusReason: null,
     quotaQueryLastError: null,
     quotaQueryLastErrorAt: null,
-    usageUpdatedAt: 1,
+    usageUpdatedAt: seed.usageUpdatedAt === undefined ? 1 : seed.usageUpdatedAt,
     createdAt: 1,
     lastUsed: 1,
     metrics:
@@ -352,4 +353,129 @@ test("null-percent metric rows are dropped from merged entries", () => {
   const antigravity = entries.find((e) => e.providers[0] === "antigravity");
   assert.equal(antigravity?.metricRows.length, 0);
   assert.equal(entries[0]?.metricRows.length, 1);
+});
+
+test("stale usage cannot override a newer snapshot of the same vendor identity", () => {
+  const fresh = summary({
+    id: "native",
+    provider: "codex",
+    email: "same@example.com",
+    remainingPercent: 90,
+    resetAt: 3_000_000,
+    usageUpdatedAt: 2_000_000,
+  });
+  const stale = summary({
+    id: "openai-codex",
+    provider: "omp",
+    email: "same@example.com",
+    remainingPercent: 0,
+    resetAt: 1_000_000,
+    usageUpdatedAt: 1_399_999,
+    status: "requiresReauthentication",
+  });
+  const [entry] = mergeAccountsByIdentity([stale, fresh]);
+  assert.deepEqual(entry?.metricRows, [
+    { label: "usage", remainingPercent: 90, resetAt: 3_000_000 },
+  ]);
+  assert.equal(entry?.worstRemainingPercent, 90);
+  // Filtering usage must not prevent managing the old source or hide auth errors.
+  assert.equal(entry?.accounts.length, 2);
+  assert.equal(entry?.needsAttention, true);
+});
+
+test("usage at the ten-minute boundary still contributes conservatively", () => {
+  const [entry] = mergeAccountsByIdentity([
+    summary({
+      id: "native",
+      provider: "codex",
+      remainingPercent: 90,
+      usageUpdatedAt: 2_000_000,
+    }),
+    summary({
+      id: "older",
+      provider: "codex",
+      remainingPercent: 20,
+      usageUpdatedAt: 1_400_000,
+      resetAt: 3_000_000,
+    }),
+  ]);
+  assert.equal(entry?.worstRemainingPercent, 20);
+  assert.deepEqual(entry?.metricRows, [
+    { label: "usage", remainingPercent: 20, resetAt: 3_000_000 },
+  ]);
+});
+
+test("unknown usage age is ignored only when the same identity has dated usage", () => {
+  const unknown = summary({
+    id: "unknown",
+    provider: "codex",
+    usageUpdatedAt: null,
+    remainingPercent: 0,
+  });
+  const dated = summary({
+    id: "dated",
+    provider: "codex",
+    usageUpdatedAt: 0,
+    remainingPercent: 80,
+  });
+  assert.equal(
+    mergeAccountsByIdentity([unknown, dated])[0]?.worstRemainingPercent,
+    80,
+  );
+  assert.equal(mergeAccountsByIdentity([unknown])[0]?.worstRemainingPercent, 0);
+});
+
+test("newer usage for another vendor or identity never suppresses old usage", () => {
+  const entries = mergeAccountsByIdentity([
+    summary({
+      id: "old",
+      provider: "codex",
+      email: "old@example.com",
+      usageUpdatedAt: 1,
+      remainingPercent: 5,
+    }),
+    summary({
+      id: "new",
+      provider: "codex",
+      email: "new@example.com",
+      usageUpdatedAt: 2_000_000,
+      remainingPercent: 90,
+    }),
+    summary({
+      id: "xai-oauth",
+      provider: "omp",
+      email: "old@example.com",
+      usageUpdatedAt: 2_000_000,
+      remainingPercent: 80,
+    }),
+  ]);
+  assert.equal(
+    entries.find((entry) =>
+      entry.accounts.some((account) => account.id === "old"),
+    )?.worstRemainingPercent,
+    5,
+  );
+});
+
+test("duplicate account records use newest usage regardless of input order", () => {
+  const old = summary({
+    id: "same",
+    provider: "codex",
+    usageUpdatedAt: null,
+    remainingPercent: 0,
+  });
+  const fresh = summary({
+    id: "same",
+    provider: "codex",
+    usageUpdatedAt: 2_000_000,
+    remainingPercent: 75,
+  });
+  for (const accounts of [
+    [old, fresh],
+    [fresh, old],
+  ]) {
+    const [entry] = mergeAccountsByIdentity(accounts);
+    assert.equal(entry?.accounts.length, 1);
+    assert.equal(entry?.worstRemainingPercent, 75);
+  }
 });
