@@ -159,6 +159,8 @@ function claudeSummary(id: string): AccountSummary {
 
 interface AdapterCalls {
   refreshAll: number;
+  /** `manual` flag observed per refreshAll invocation, in order. */
+  refreshManualFlags: Array<boolean | undefined>;
   removes: string[];
   authCancels: number;
 }
@@ -203,8 +205,9 @@ function fakeAdapters(
       return flow;
     },
     refresh: async () => claudeSummary("claude-1"),
-    refreshAll: async () => {
+    refreshAll: async (_signal, options) => {
       calls.refreshAll += 1;
+      calls.refreshManualFlags.push(options?.manual);
       const provider: ProviderId = "claude";
       return behavior.refresh !== undefined
         ? behavior.refresh(provider)
@@ -232,8 +235,9 @@ function fakeAdapters(
   ] as const) {
     registry[provider] = {
       ...adapter,
-      refreshAll: async () => {
+      refreshAll: async (_signal, options) => {
         calls.refreshAll += 1;
+        calls.refreshManualFlags.push(options?.manual);
         return behavior.refresh !== undefined
           ? behavior.refresh(provider)
           : [claudeSummary("claude-1")];
@@ -277,7 +281,12 @@ test("interval clamping keeps 30-3600 with 600 default", () => {
 });
 
 test("cached summaries publish first, then the silent startup refresh", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   await withRuntime(fakeAdapters(calls), async (runtime) => {
     const controller = new MonitorController({
       runtime,
@@ -327,7 +336,12 @@ test("cached summaries publish first, then the silent startup refresh", async ()
 test("global lock: r and R during a refresh are ignored (no overlap)", {
   timeout: 5_000,
 }, async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   const gate = Promise.withResolvers<void>();
   // Resolved INSIDE the first gated refresh callback, so awaiting it
   // proves the sequence actually reached the adapter — no fixed settle
@@ -375,7 +389,12 @@ test("global lock: r and R during a refresh are ignored (no overlap)", {
 });
 
 test("r refreshes only the selected provider; empty and disabled are skipped", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   const perProvider = new Map<ProviderId, number>();
   await withRuntime(
     fakeAdapters(calls, {
@@ -410,7 +429,12 @@ test("r refreshes only the selected provider; empty and disabled are skipped", a
 });
 
 test("failed refresh keeps cached summaries and records the error", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   await withRuntime(
     fakeAdapters(calls, {
       refresh: () => {
@@ -437,7 +461,12 @@ test("failed refresh keeps cached summaries and records the error", async () => 
 });
 
 test("claude keeps a 180s minimum gap between auto refreshes", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   await withRuntime(fakeAdapters(calls), async (runtime) => {
     const manual = createManualClock(0);
     const controller = new MonitorController({
@@ -468,7 +497,12 @@ test("claude keeps a 180s minimum gap between auto refreshes", async () => {
 });
 
 test("auto refresh clamps its interval and skips while busy", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   await withRuntime(fakeAdapters(calls), async (runtime) => {
     const manual = createManualClock(0);
     const controller = new MonitorController({
@@ -493,8 +527,56 @@ test("auto refresh clamps its interval and skips while busy", async () => {
   });
 });
 
+test("refresh passes manual=true only on user-triggered r/R", async () => {
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
+  await withRuntime(fakeAdapters(calls), async (runtime) => {
+    const manual = createManualClock(0);
+    const controller = new MonitorController({
+      runtime,
+      settings: { ...DEFAULT_SETTINGS, claudePolicyAccepted: true },
+      clock: manual.clock,
+    });
+    await controller.start();
+    await settle();
+    assert.deepEqual(
+      calls.refreshManualFlags,
+      [false],
+      "startup refresh is automatic",
+    );
+
+    manual.advance(200_000);
+    await controller.refreshSelected("claude");
+    await settle();
+    assert.deepEqual(
+      calls.refreshManualFlags,
+      [false, true],
+      "r is manual",
+    );
+
+    manual.advance(200_000);
+    await controller.refreshAll();
+    await settle();
+    assert.deepEqual(
+      calls.refreshManualFlags,
+      [false, true, true],
+      "R is manual",
+    );
+    await controller.dispose();
+  });
+});
+
 test("auth lifecycle: state, result, cancel, and dispose cleanup", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   await withRuntime(fakeAdapters(calls), async (runtime) => {
     const manual = createManualClock(0);
     const controller = new MonitorController({
@@ -531,7 +613,12 @@ test("auth lifecycle: state, result, cancel, and dispose cleanup", async () => {
 });
 
 test("removeAccount drops the local copy and updates state", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   await withRuntime(fakeAdapters(calls), async (runtime) => {
     const controller = new MonitorController({
       runtime,
@@ -551,7 +638,12 @@ test("removeAccount drops the local copy and updates state", async () => {
 test("duplicate refresh while the lock is held publishes the exact notice", {
   timeout: 5_000,
 }, async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   const gate = Promise.withResolvers<void>();
   // Fired inside the first gated refresh so the busy assertion observes
   // the lock the moment the sequence actually reached the adapter.
@@ -594,7 +686,12 @@ test("duplicate refresh while the lock is held publishes the exact notice", {
 test("dispose aborts and awaits the in-flight sequence", {
   timeout: 5_000,
 }, async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   const gate = Promise.withResolvers<void>();
   // Fired synchronously inside the overridden refreshAll so awaiting it
   // proves the sequence reached the adapter — no fixed settle window.
@@ -648,7 +745,12 @@ test("dispose aborts and awaits the in-flight sequence", {
 });
 
 test("updateSettings unlocks claude; manual r and R respect the 180s gap", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   await withRuntime(fakeAdapters(calls), async (runtime) => {
     const manual = createManualClock(0);
     const controller = new MonitorController({
@@ -687,7 +789,12 @@ test("updateSettings unlocks claude; manual r and R respect the 180s gap", async
 });
 
 test("import flow: discovery is read-free and import needs explicit confirmation", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   const ops = { discover: 0, imports: 0 };
   await withRuntime(fakeAdapters(calls), async (runtime) => {
     const controller = new MonitorController({
@@ -729,7 +836,12 @@ test("import flow: discovery is read-free and import needs explicit confirmation
 });
 
 test("cancelled auth results publish nothing afterwards", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   await withRuntime(fakeAdapters(calls), async (runtime) => {
     const result = Promise.withResolvers<AccountSummary[]>();
     runtime.adapters.claude.beginAuth = async () => ({
@@ -766,7 +878,12 @@ test("cancelled auth results publish nothing afterwards", async () => {
 });
 
 test("startupComplete flips only after the silent startup settles", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   const gate = Promise.withResolvers<void>();
   await withRuntime(
     fakeAdapters(calls, {
@@ -789,7 +906,12 @@ test("startupComplete flips only after the silent startup settles", async () => 
 });
 
 test("beginAuth reports outcome and rejects duplicates during setup", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   const flowGate = Promise.withResolvers<AuthFlow>();
   await withRuntime(
     fakeAdapters(calls, { beginAuth: () => flowGate.promise }),
@@ -829,7 +951,12 @@ test("beginAuth reports outcome and rejects duplicates during setup", async () =
 });
 
 test("beginAuth on gated Claude publishes the policy reason and never calls the adapter", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   await withRuntime(fakeAdapters(calls), async (runtime) => {
     const controller = new MonitorController({
       runtime,
@@ -850,7 +977,12 @@ test("beginAuth on gated Claude publishes the policy reason and never calls the 
 });
 
 test("dispose aborts and awaits an in-flight discovery", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   const aborted = Promise.withResolvers<void>();
   await withRuntime(
     fakeAdapters(calls, {
@@ -884,7 +1016,12 @@ test("dispose aborts and awaits an in-flight discovery", async () => {
 });
 
 test("dispose awaits an in-flight removal even without a signal", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   const removalGate = Promise.withResolvers<void>();
   let removeSettled = false;
   await withRuntime(
@@ -925,7 +1062,12 @@ test("dispose awaits an in-flight removal even without a signal", async () => {
 });
 
 test("manual refreshAll explains a cooled-down Claude and still refreshes others", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   const refreshedProviders: ProviderId[] = [];
   const manual = createManualClock(1_000);
   await withRuntime(
@@ -965,7 +1107,12 @@ test("manual refreshAll explains a cooled-down Claude and still refreshes others
 });
 
 test("startup auto-imports every discovered account, claude included", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   const ops = {
     discovered: [] as string[],
     imported: [] as string[],
@@ -1024,7 +1171,12 @@ test("startup auto-imports every discovered account, claude included", async () 
 });
 
 test("startup auto-import skips claude while its policy is declined", async () => {
-  const calls: AdapterCalls = { refreshAll: 0, removes: [], authCancels: 0 };
+  const calls: AdapterCalls = {
+    refreshAll: 0,
+    refreshManualFlags: [],
+    removes: [],
+    authCancels: 0,
+  };
   const ops = { discovered: [] as string[] };
   const registry = fakeAdapters(calls);
   registry.claude.discoverImports = async () => {

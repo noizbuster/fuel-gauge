@@ -328,7 +328,10 @@ export class MonitorController {
           this.#setRecord(provider, { accounts: seeded.get(provider) ?? [] });
         }
       }
-      await this.#runSequence(PROVIDER_ORDER, { silent: true });
+      await this.#runSequence(PROVIDER_ORDER, {
+        silent: true,
+        manual: false,
+      });
       if (!this.#disposed) {
         this.#startupComplete = true;
         this.#publish();
@@ -405,7 +408,7 @@ export class MonitorController {
     if (due.length === 0) {
       return;
     }
-    await this.#runSequence(due, { silent: true });
+    await this.#runSequence(due, { silent: true, manual: false });
   }
 
   #refreshableProviders(): ProviderId[] {
@@ -446,7 +449,7 @@ export class MonitorController {
       });
       return;
     }
-    await this.#runSequence([provider], { silent: false });
+    await this.#runSequence([provider], { silent: false, manual: true });
   }
 
   /** `R`: refresh every refreshable provider sequentially under one lock. */
@@ -475,7 +478,7 @@ export class MonitorController {
     }
     await this.#runSequence(
       due.filter((provider) => this.#claudeCooldownElapsed(provider)),
-      { silent: false },
+      { silent: false, manual: true },
     );
   }
 
@@ -486,7 +489,7 @@ export class MonitorController {
    */
   async #runSequence(
     providers: readonly ProviderId[],
-    options: { silent: boolean },
+    options: { silent: boolean; manual: boolean },
   ): Promise<void> {
     if (this.#busy || this.#disposed || providers.length === 0) {
       return;
@@ -524,12 +527,14 @@ export class MonitorController {
   async #refreshOne(
     provider: ProviderId,
     signal: AbortSignal,
-    options: { silent: boolean },
+    options: { silent: boolean; manual: boolean },
   ): Promise<void> {
     this.#setRecord(provider, { phase: "refreshing", error: null });
     try {
-      const refreshed =
-        await this.#runtime.adapters[provider].refreshAll(signal);
+      const refreshed = await this.#runtime.adapters[provider].refreshAll(
+        signal,
+        { manual: options.manual },
+      );
       if (this.#disposed || signal.aborted) {
         return;
       }

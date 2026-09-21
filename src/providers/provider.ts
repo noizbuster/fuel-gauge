@@ -133,8 +133,16 @@ export interface ProviderAdapter {
   beginAuth(signal: AbortSignal): Promise<AuthFlow>;
   /** Refreshes one account, retaining its last safe quota on failure. */
   refresh(accountId: string, signal: AbortSignal): Promise<AccountSummary>;
-  /** Sequential, order-preserving refresh of every stored account. */
-  refreshAll(signal: AbortSignal): Promise<AccountSummary[]>;
+  /**
+   * Sequential, order-preserving refresh of every stored account.
+   * `manual` is true only for user-triggered refreshes (`r`/`R`);
+   * adapters whose accounts need deliberate, costly refreshes (the
+   * Antigravity CLI source) may skip them on automatic passes.
+   */
+  refreshAll(
+    signal: AbortSignal,
+    options?: { readonly manual?: boolean },
+  ): Promise<AccountSummary[]>;
   /** Deletes the Fuel Gauge copy only; never touches the source credential. */
   remove(accountId: string): Promise<void>;
 }

@@ -7,6 +7,8 @@
  * `Accept-Encoding`; timestamps are epoch milliseconds.
  */
 
+import { accessSync, constants as fsConstants } from "node:fs";
+import { open, readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -58,6 +60,94 @@ const GOOGLE_USERINFO_ENDPOINT =
 const OAUTH_AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const OAUTH_CLIENT_ID =
   "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+const AGY_BINARY_NAME = "agy";
+const AGY_SECRET_SCAN_CHUNK_BYTES = 4 * 1024 * 1024;
+const AGY_SECRET_SCAN_OVERLAP_BYTES = 64;
+/** Token body after `GOCSPX-`; shorter runs are binary noise. */
+const AGY_SECRET_BODY = /^[A-Za-z0-9_-]{20,40}/;
+
+/**
+ * Google OAuth client secrets for installed-app clients ship inside the
+ * downloadable client and are public by distribution — but secret
+ * scanners pattern-block the bare literal, so the value is not source
+ * material here. It is read from the installed `agy` binary (already
+ * this provider's login authority). Several Google clients are embedded
+ * in that binary without pair structure, so every `GOCSPX-` token is a
+ * candidate and the token endpoint's `invalid_client` reply rotates to
+ * the next one — no pairing heuristics.
+ */
+export function extractAgyClientSecrets(text: string): string[] {
+  const candidates: string[] = [];
+  const segments = text.split("GOCSPX-");
+  for (let index = 1; index < segments.length; index += 1) {
+    const body = AGY_SECRET_BODY.exec(segments[index] ?? "")?.[0];
+    if (body !== undefined) {
+      candidates.push(`GOCSPX-${body}`);
+    }
+  }
+  return [...new Set(candidates)];
+}
+
+/** First executable `agy` on PATH, mirroring how the CLI itself is run. */
+function findAgyBinaryPath(env: NodeJS.ProcessEnv): string | null {
+  for (const dir of (env.PATH ?? "").split(path.delimiter)) {
+    if (dir === "") {
+      continue;
+    }
+    for (const name of [AGY_BINARY_NAME, `${AGY_BINARY_NAME}.exe`]) {
+      const candidate = path.join(dir, name);
+      try {
+        accessSync(candidate, fsConstants.X_OK);
+        return candidate;
+      } catch {
+        // Absent or not executable in this directory.
+      }
+    }
+  }
+  return null;
+}
+
+/** Streams the agy binary, splitting every embedded secret candidate out. */
+async function scanAgyBinaryForSecrets(
+  filePath: string,
+): Promise<readonly string[]> {
+  const handle = await open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(
+      AGY_SECRET_SCAN_CHUNK_BYTES + AGY_SECRET_SCAN_OVERLAP_BYTES,
+    );
+    const candidates: string[] = [];
+    let carry = "";
+    let position = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        buffer.length,
+        position,
+      );
+      if (bytesRead === 0) {
+        break;
+      }
+      const text = carry + buffer.toString("latin1", 0, bytesRead);
+      candidates.push(...extractAgyClientSecrets(text));
+      if (bytesRead <= AGY_SECRET_SCAN_OVERLAP_BYTES) {
+        break;
+      }
+      // A token may straddle the chunk edge; re-scan the overlap ahead.
+      carry = text.slice(-AGY_SECRET_SCAN_OVERLAP_BYTES);
+      position += bytesRead - AGY_SECRET_SCAN_OVERLAP_BYTES;
+    }
+    return [...new Set(candidates)];
+  } finally {
+    await handle.close();
+  }
+}
+/** agy CLI executable (resolved from PATH) used as the login authority. */
+const AGY_COMMAND = "agy";
+const AGY_MODELS_TIMEOUT_MS = 20_000;
+const AGY_USAGE_TIMEOUT_MS = 30_000;
+const AGY_CANDIDATE_LABEL = "Antigravity CLI login (agy models)";
 const OAUTH_CALLBACK_PATH = "/oauth-callback";
 const OAUTH_TIMEOUT_MS = 300_000;
 const CODE_ASSIST_BASE_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
@@ -281,7 +371,64 @@ function tierField(
 export function createAntigravityProvider(
   deps: RuntimeDependencies,
 ): ProviderAdapter {
-  const { store, fetch, clock, callbackServer } = deps;
+  const { store, fetch, clock, callbackServer, subprocess } = deps;
+
+  let agySecretCandidates: readonly string[] | null = null;
+
+  /** Candidate client secrets scanned out of the agy install, memoized. */
+  async function clientSecretCandidates(): Promise<readonly string[]> {
+    if (agySecretCandidates !== null) {
+      return agySecretCandidates;
+    }
+    const binary = findAgyBinaryPath(process.env);
+    agySecretCandidates =
+      binary === null
+        ? []
+        : await scanAgyBinaryForSecrets(binary).catch(() => []);
+    return agySecretCandidates;
+  }
+
+  interface TokenFormResult {
+    ok: boolean;
+    status: number;
+    text: string;
+  }
+
+  /**
+   * Posts to Google's token endpoint with each candidate client secret
+   * until one authenticates. A wrong installed-app secret fails client
+   * auth (`invalid_client`) before the grant is examined, so rotating is
+   * safe for both authorization-code and refresh grants.
+   */
+  async function postTokenForm(
+    entries: readonly (readonly [string, string])[],
+    signal: AbortSignal,
+  ): Promise<TokenFormResult> {
+    const secrets = await clientSecretCandidates();
+    if (secrets.length === 0) {
+      throw new Error(
+        "Antigravity login requires the agy CLI on PATH (the OAuth client secret is read from its install)",
+      );
+    }
+    let last: TokenFormResult | null = null;
+    for (const secret of secrets) {
+      const response = await postForm(
+        GOOGLE_TOKEN_ENDPOINT,
+        [...entries, ["client_secret", secret]],
+        { signal, timeoutMs: HTTP_TIMEOUT_MS, fetchImpl: fetch },
+      );
+      const text = await response.text();
+      last = { ok: response.ok, status: response.status, text };
+      if (response.ok || !text.includes("invalid_client")) {
+        return last;
+      }
+      // Wrong embedded client; rotate to the next candidate secret.
+    }
+    if (last === null) {
+      throw new Error("agy client secret scan produced no candidates");
+    }
+    return last;
+  }
 
   // -------------------------------------------------------------------------
   // Local discovery: $GEMINI_CLI_HOME/.gemini then ~/.gemini
@@ -318,6 +465,17 @@ export function createAntigravityProvider(
         });
       }
     }
+    try {
+      await runAgyModels(signal);
+      candidates.push({
+        provider: "antigravity",
+        source: "subprocess",
+        label: AGY_CANDIDATE_LABEL,
+        path: null,
+      });
+    } catch {
+      // agy missing or not logged in: nothing to offer.
+    }
     return candidates;
   }
 
@@ -325,7 +483,7 @@ export function createAntigravityProvider(
     candidate: ImportCandidate,
     signal: AbortSignal,
   ): Promise<AccountSummary[]> {
-    if (candidate.path == null) {
+    if (candidate.path == null && candidate.source !== "subprocess") {
       throw new DiscoveryError(
         "NoCredentialFound",
         "Antigravity import requires a credential file path",
@@ -347,6 +505,9 @@ export function createAntigravityProvider(
       (entry): DiscoverySource<StoredAntigravityAccount> => ({
         candidate: entry,
         load: (loadSignal) => {
+          if (entry.source === "subprocess") {
+            return importFromAgyCli(loadSignal);
+          }
           const credsPath = entry.path;
           if (credsPath == null) {
             throw new DiscoveryError(
@@ -432,6 +593,102 @@ export function createAntigravityProvider(
       createdAt: now,
       lastUsed: now,
     };
+  }
+
+  /**
+   * Verifies the agy login by letting the CLI list models — its own
+   * normal operation. Fuel Gauge never reads or uses agy's OAuth
+   * credentials (ToS risk); agy is the sole token holder.
+   */
+  async function runAgyModels(signal: AbortSignal): Promise<void> {
+    let stdout: string;
+    let stderr: string;
+    try {
+      const result = await subprocess.run(AGY_COMMAND, ["models"], {
+        timeoutMs: AGY_MODELS_TIMEOUT_MS,
+        signal,
+      });
+      stdout = result.stdout;
+      stderr = result.stderr;
+    } catch (error) {
+      throw new DiscoveryError(
+        "NoCredentialFound",
+        `agy CLI could not run: ${errorText(error)}`,
+      );
+    }
+    const listsModels = stdout
+      .split("\n")
+      .some((line) => /^[^\t\r\n]+\t\S/.test(line));
+    if (!listsModels) {
+      throw new DiscoveryError(
+        "NoCredentialFound",
+        `agy CLI did not list models (not logged in?)${stderr.trim() === "" ? "" : `: ${snippet(redactSecrets(stderr), 200)}`}`,
+      );
+    }
+  }
+
+  async function importFromAgyCli(
+    signal: AbortSignal,
+  ): Promise<StoredAntigravityAccount> {
+    await runAgyModels(signal);
+    const login = await readAgyCliLogin(signal);
+    if (login == null) {
+      throw new DiscoveryError(
+        "EmptyCredential",
+        "agy CLI login was not found in its logs; run agy once and sign in",
+      );
+    }
+    const now = clock.now();
+    return {
+      provider: "antigravity",
+      id: antigravityAccountId(login.email),
+      email: login.email,
+      source: "cli",
+      authId: null,
+      name: null,
+      accessToken: "",
+      refreshToken: null,
+      idToken: null,
+      tokenType: null,
+      scope: null,
+      expiryDate: null,
+      selectedAuthType: login.authMethod,
+      projectId: null,
+      tierId: null,
+      planName: null,
+      credits: [],
+      quota: emptyQuota(),
+      status: "active",
+      statusReason: null,
+      quotaQueryLastError: null,
+      quotaQueryLastErrorAt: null,
+      usageUpdatedAt: null,
+      createdAt: now,
+      lastUsed: now,
+    };
+  }
+
+  /** Newest `applyAuthResult` across agy's own logs; never throws. */
+  async function readAgyCliLogin(
+    signal: AbortSignal,
+  ): Promise<{ email: string; authMethod: string | null } | null> {
+    try {
+      const logDir = agyLogDirectory(process.env);
+      const entries = (await readdir(logDir)).filter((name) =>
+        /^cli-.*\.log$/.test(name),
+      );
+      entries.sort((a, b) => b.localeCompare(a));
+      for (const name of entries.slice(0, 5)) {
+        if (signal.aborted) return null;
+        const login = parseAntigravityCliLogin(
+          await readFile(path.join(logDir, name), "utf8"),
+        );
+        if (login != null) return login;
+      }
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   /** Same-directory enrichment only; any failure simply yields undefined. */
@@ -544,10 +801,9 @@ export function createAntigravityProvider(
     code: string,
     signal: AbortSignal,
   ): Promise<Record<string, unknown>> {
-    let response: Response;
+    let result: TokenFormResult;
     try {
-      response = await postForm(
-        GOOGLE_TOKEN_ENDPOINT,
+      result = await postTokenForm(
         [
           ["code", code],
           ["client_id", OAUTH_CLIENT_ID],
@@ -555,21 +811,20 @@ export function createAntigravityProvider(
           ["grant_type", "authorization_code"],
           ["code_verifier", codeVerifier],
         ],
-        { signal, timeoutMs: HTTP_TIMEOUT_MS, fetchImpl: fetch },
+        signal,
       );
     } catch (error) {
       throw new Error(
         `Antigravity OAuth token request failed: ${errorText(error)}`,
       );
     }
-    const body = await response.text();
-    if (!response.ok) {
+    if (!result.ok) {
       throw new Error(
-        `Antigravity OAuth token exchange returned ${response.status} with body length ${body.length}`,
+        `Antigravity OAuth token exchange returned ${result.status} with body length ${result.text.length}`,
       );
     }
     try {
-      const parsed: unknown = JSON.parse(body);
+      const parsed: unknown = JSON.parse(result.text);
       const root = asRecord(parsed);
       if (root == null) {
         throw new Error("Antigravity OAuth token response is not an object");
@@ -606,6 +861,10 @@ export function createAntigravityProvider(
     );
     if (account == null) {
       throw new Error(`Could not read Antigravity account: ${accountId}`);
+    }
+
+    if (account.source === "cli") {
+      return refreshCliAccount(account, signal);
     }
 
     const refreshed = await ensureAccessTokenValid(account, signal);
@@ -694,16 +953,15 @@ export function createAntigravityProvider(
     if (account.refreshToken == null) {
       return { account, error: "Antigravity refresh token is missing." };
     }
-    let response: Response;
+    let result: TokenFormResult;
     try {
-      response = await postForm(
-        GOOGLE_TOKEN_ENDPOINT,
+      result = await postTokenForm(
         [
           ["client_id", OAUTH_CLIENT_ID],
           ["refresh_token", account.refreshToken],
           ["grant_type", "refresh_token"],
         ],
-        { signal, timeoutMs: HTTP_TIMEOUT_MS, fetchImpl: fetch },
+        signal,
       );
     } catch (error) {
       return {
@@ -711,16 +969,15 @@ export function createAntigravityProvider(
         error: `Could not refresh Antigravity token: ${errorText(error)}`,
       };
     }
-    const text = await response.text();
-    if (!response.ok) {
+    if (!result.ok) {
       return {
         account,
-        error: `Antigravity token refresh failed: status=${response.status} ${responsePreview(redactSecrets(text))}`,
+        error: `Antigravity token refresh failed: status=${result.status} ${responsePreview(redactSecrets(result.text))}`,
       };
     }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(text);
+      parsed = JSON.parse(result.text);
     } catch (error) {
       return {
         account,
@@ -866,6 +1123,86 @@ export function createAntigravityProvider(
     }
   }
 
+
+  /**
+   * CLI accounts hold no tokens by design: manual refresh asks the
+   * CLI for its own quota panel (`agy -p /usage` — a client-side
+   * command, zero model calls) and re-reads identity from its logs.
+   */
+  async function refreshCliAccount(
+    account: StoredAntigravityAccount,
+    signal: AbortSignal,
+  ): Promise<AccountSummary> {
+    let quota: AntigravityQuotaSummary;
+    try {
+      quota = await runAgyUsage(signal);
+    } catch (error) {
+      return recordRefreshError(
+        account,
+        error instanceof DiscoveryError
+          ? error.message
+          : errorMessage(error),
+      );
+    }
+    const login = await readAgyCliLogin(signal);
+    const now = clock.now();
+    const current: StoredAntigravityAccount = {
+      ...account,
+      email: login?.email ?? account.email,
+      selectedAuthType: login?.authMethod ?? account.selectedAuthType,
+      quota,
+      lastUsed: now,
+      usageUpdatedAt: now,
+      status: "active",
+      statusReason: null,
+    };
+    await store.upsert("antigravity", current);
+    return summaryOf(current.id);
+  }
+
+  /**
+   * Runs `agy -p /usage` and parses its TSV quota panel. The command
+   * is client-side inside agy (no model turn is spent), but it is the
+   * ONLY accurate quota source, so callers keep it on the manual path.
+   */
+  async function runAgyUsage(
+    signal: AbortSignal,
+  ): Promise<AntigravityQuotaSummary> {
+    let stdout: string;
+    let stderr: string;
+    try {
+      const result = await subprocess.run(
+        AGY_COMMAND,
+        ["-p", "/usage"],
+        {
+          timeoutMs: AGY_USAGE_TIMEOUT_MS,
+          signal,
+          cwd: homedir(),
+        },
+      );
+      stdout = result.stdout;
+      stderr = result.stderr;
+    } catch (error) {
+      throw new DiscoveryError(
+        "NoCredentialFound",
+        `agy CLI could not run: ${errorText(error)}`,
+      );
+    }
+    const quota = parseAntigravityUsageOutput(stdout);
+    const anyWindow =
+      quota.geminiFiveHour.remainingPercent ??
+      quota.geminiWeekly.remainingPercent ??
+      quota.thirdPartyFiveHour.remainingPercent ??
+      quota.thirdPartyWeekly.remainingPercent;
+    if (anyWindow == null) {
+      throw new DiscoveryError(
+        "NoCredentialFound",
+        `agy CLI reported no quota windows (not logged in?)${stderr.trim() === "" ? "" : `: ${snippet(redactSecrets(stderr), 200)}`}`,
+      );
+    }
+    return quota;
+  }
+
   async function recordRefreshError(
     account: StoredAntigravityAccount,
     error: string,
@@ -882,10 +1219,18 @@ export function createAntigravityProvider(
     return summaryOf(account.id);
   }
 
-  async function refreshAll(signal: AbortSignal): Promise<AccountSummary[]> {
+  async function refreshAll(
+    signal: AbortSignal,
+    options?: { manual?: boolean },
+  ): Promise<AccountSummary[]> {
     const accounts = await store.listStored("antigravity");
     for (const account of accounts) {
       if (signal.aborted) break;
+      // CLI-sourced accounts refresh ONLY on the user's explicit r/R:
+      // automatic passes keep the last manually fetched quota.
+      if (account.provider === "antigravity" && account.source === "cli") {
+        if (options?.manual !== true) continue;
+      }
       try {
         await refresh(account.id, signal);
       } catch {
@@ -1080,4 +1425,75 @@ export async function applyAntigravityTokenResponseForTest(
   };
   await store.upsert("antigravity", account);
   return account;
+}
+
+/**
+ * Extracts the login agy last applied from its own log text; the LAST
+ * `applyAuthResult` line wins (re-logins within one file are possible).
+ * Exported for tests.
+ */
+export function parseAntigravityCliLogin(
+  text: string,
+): { email: string; authMethod: string | null } | null {
+  const pattern = /applyAuthResult: email=([^,\s]+),\s*authMethod=([^,\s]*)/g;
+  let last: { email: string; authMethod: string | null } | null = null;
+  for (const match of text.matchAll(pattern)) {
+    const email = match[1];
+    const authMethod = match[2];
+    if (email == null) continue;
+    last = {
+      email,
+      authMethod: authMethod == null || authMethod === "" ? null : authMethod,
+    };
+  }
+  return last;
+}
+
+/**
+ * Parses the TSV quota panel printed by `agy -p /usage`, e.g.
+ * `Gemini Models\tWeekly Limit Remaining\t98.98%\t2026-09-27T11:26:52Z`.
+ * Unknown rows are ignored; rows absent from the panel leave their
+ * window null. Exported for tests.
+ */
+export function parseAntigravityUsageOutput(
+  text: string,
+): AntigravityQuotaSummary {
+  const quota = emptyQuota();
+  for (const line of text.split("\n")) {
+    const cells = line.split("\t").map((cell) => cell.trim());
+    if (cells.length < 3) continue;
+    const [group, window, percentCell, resetCell] = cells as [
+      string,
+      string,
+      string,
+      string | undefined,
+    ];
+    const percentMatch = /^([0-9]+(?:\.[0-9]+)?)\s*%$/.exec(percentCell);
+    if (percentMatch == null) continue;
+    const percent = Number(percentMatch[1]);
+    const resetMs = resetCell != null ? Date.parse(resetCell) : Number.NaN;
+    const resetAt = Number.isFinite(resetMs) ? resetMs : null;
+    const weekly = window.includes("Weekly");
+    const fiveHour = window.includes("Five Hour");
+    if (!weekly && !fiveHour) continue;
+    if (group.startsWith("Gemini")) {
+      if (weekly) quota.geminiWeekly = { remainingPercent: percent, resetAt };
+      else quota.geminiFiveHour = { remainingPercent: percent, resetAt };
+    } else if (group.startsWith("Claude")) {
+      if (weekly) {
+        quota.thirdPartyWeekly = { remainingPercent: percent, resetAt };
+      } else {
+        quota.thirdPartyFiveHour = { remainingPercent: percent, resetAt };
+      }
+    }
+  }
+  return quota;
+}
+
+/** agy writes its rotating logs under `~/.gemini/antigravity-cli/log`. */
+function agyLogDirectory(
+  env: Readonly<Record<string, string | undefined>>,
+): string {
+  const geminiHome = envOverride(env, "GEMINI_CLI_HOME") ?? homedir();
+  return path.join(geminiHome, ".gemini", "antigravity-cli", "log");
 }

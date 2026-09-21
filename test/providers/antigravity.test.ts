@@ -1,23 +1,27 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import type {
   AccountSummary,
   AntigravityAccountSummary,
   StoredAntigravityAccount,
 } from "../../src/core/types.js";
+import type { SubprocessPort } from "../../src/core/subprocess.js";
 import {
   applyAntigravityTokenResponseForTest,
   buildAntigravityCodeAssistHeaders,
   buildAntigravityLoadCodeAssistPayload,
   buildAntigravityOAuthStart,
   createAntigravityProvider,
+  extractAgyClientSecrets,
   parseAntigravityCodeAssistResponse,
   parseAntigravityLoadStatus,
+  parseAntigravityCliLogin,
   parseAntigravityQuota,
+  parseAntigravityUsageOutput,
 } from "../../src/providers/antigravity.js";
 import {
   fixedClock,
@@ -74,7 +78,27 @@ function recorder(
   };
   return { requests, fetch: fetchLike };
 }
+const FAKE_AGY_SECRET = "GOCSPX-testcandidate0000000000000000";
 
+/**
+ * Puts a fake executable `agy` (containing `secrets`, concatenated the
+ * way the real binary embeds them) first on PATH for one test.
+ */
+async function fakeAgyOnPath(
+  t: TestContext,
+  secrets: readonly string[] = [FAKE_AGY_SECRET],
+): Promise<void> {
+  const dir = await mkdtemp(path.join(tmpdir(), "fuel-gauge-ag-path-"));
+  const binary = path.join(dir, "agy");
+  await writeFile(binary, secrets.join(""));
+  await chmod(binary, 0o755);
+  const previous = process.env.PATH;
+  process.env.PATH = `${dir}${path.delimiter}${previous ?? ""}`;
+  t.after(async () => {
+    process.env.PATH = previous;
+    await rm(dir, { recursive: true, force: true });
+  });
+}
 /** Canonical case: imports_local_antigravity_credentials_without_returning_tokens_in_summary */
 test("imports local antigravity credentials without returning tokens in summary", async (t) => {
   const home = await mkdtemp(path.join(tmpdir(), "fuel-gauge-ag-home-"));
@@ -278,9 +302,10 @@ test("builds antigravity oauth start with google scopes and local callback", () 
   );
 });
 
-test("antigravity source login exchanges a PKCE code without a client secret", async (t) => {
+test("antigravity source login exchanges a PKCE code with the public client secret", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "fuel-gauge-ag-"));
   t.after(() => rm(root, { recursive: true, force: true }));
+  await fakeAgyOnPath(t);
   const exchangeBodies: string[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -353,7 +378,7 @@ test("antigravity source login exchanges a PKCE code without a client secret", a
     "http://127.0.0.1:1466/oauth-callback",
   );
   assert.equal(params.get("grant_type"), "authorization_code");
-  assert.equal(params.has("client_secret"), false);
+  assert.match(params.get("client_secret") ?? "", /^GOCSPX-/);
 });
 
 /** Canonical case: applies_antigravity_oauth_token_response_without_returning_tokens_in_summary */
@@ -559,9 +584,10 @@ test("antigravity refresh: exact sequence, headers, bodies; never Accept-Encodin
   assert.equal(summary.projectId, "project-123");
 });
 
-test("antigravity stale token refreshes without a client secret", async (t) => {
+test("antigravity stale token refreshes with the public client secret", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "fuel-gauge-ag-"));
   t.after(() => rm(root, { recursive: true, force: true }));
+  await fakeAgyOnPath(t);
   const seeded = await applyAntigravityTokenResponseForTest(
     makeTestRuntime(noNetwork, { root }),
     {
@@ -603,7 +629,7 @@ test("antigravity stale token refreshes without a client secret", async (t) => {
   );
   assert.equal(params.get("refresh_token"), "stale-refresh");
   assert.equal(params.get("grant_type"), "refresh_token");
-  assert.equal(params.has("client_secret"), false);
+  assert.match(params.get("client_secret") ?? "", /^GOCSPX-/);
   const stored = await deps.store.listStored("antigravity");
   const account = stored[0];
   if (account == null || account.provider !== "antigravity")
@@ -752,5 +778,398 @@ test("antigravity import aggregates typed failures across every tried path", asy
       assert.ok(message.includes(path.join(geminiDir, "oauth_creds.json")));
       return true;
     },
+  );
+});
+
+type AgyCall = { stdout: string; stderr?: string } | Error;
+
+function agySubprocess(
+  models: AgyCall,
+  usage: AgyCall = { stdout: "" },
+): SubprocessPort {
+  return {
+    async run(command, args) {
+      if (command !== "agy") {
+        throw new Error(`unexpected subprocess call: ${command}`);
+      }
+      const behavior = args[0] === "-p" && args[1] === "/usage" ? usage : models;
+      if (args[0] === "models" || (args[0] === "-p" && args[1] === "/usage")) {
+        if (behavior instanceof Error) throw behavior;
+        return { stdout: behavior.stdout, stderr: behavior.stderr ?? "" };
+      }
+      throw new Error(`unexpected subprocess call: ${command} ${args.join(" ")}`);
+    },
+  };
+}
+
+const AGY_MODELS_OK = {
+  stdout: "Fetching available models...\ngemini-3-pro-high\tGemini 3 Pro (High)\n",
+};
+
+const AGY_LOG_LINE = (email: string) =>
+  `I0920 19:40:15.752967     322 server_oauth.go:192] applyAuthResult: email=${email}, authMethod=consumer, quotaProject=\n`;
+
+test("antigravity discovers and imports the agy CLI login", async (t) => {
+  const home = await mkdtemp(path.join(tmpdir(), "fuel-gauge-ag-home-"));
+  const root = await mkdtemp(path.join(tmpdir(), "fuel-gauge-ag-"));
+  t.after(async () => {
+    await rm(home, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  });
+  const logDir = path.join(home, ".gemini", "antigravity-cli", "log");
+  await mkdir(logDir, { recursive: true });
+  await writeFile(
+    path.join(logDir, "cli-20260920_194015.log"),
+    AGY_LOG_LINE("cliuser@example.com"),
+    "utf8",
+  );
+  const env = process.env;
+  const previousHome = env.HOME;
+  env.HOME = home;
+  t.after(() => {
+    if (previousHome === undefined) delete env.HOME;
+    else env.HOME = previousHome;
+  });
+
+  const deps = makeTestRuntime(noNetwork, {
+    root,
+    subprocess: agySubprocess(AGY_MODELS_OK),
+  });
+  const provider = createAntigravityProvider(deps);
+  const candidates = await provider.discoverImports(signal());
+  const cli = candidates.find((entry) => entry.source === "subprocess");
+  if (cli == null) assert.fail("agy CLI candidate missing");
+  assert.equal(cli.path, null);
+  assert.equal(cli.label, "Antigravity CLI login (agy models)");
+
+  const summaries = await provider.import(cli, signal());
+  const summary = asAntigravitySummary(summaries[0]);
+  assert.equal(summary.email, "cliuser@example.com");
+  assert.equal(summary.source, "cli");
+  assert.equal(summary.selectedAuthType, "consumer");
+
+  const stored = await deps.store.listStored("antigravity");
+  const account = stored[0];
+  if (account == null || account.provider !== "antigravity") {
+    assert.fail("stored agy CLI account missing");
+  }
+  assert.equal(account.accessToken, "");
+  assert.equal(account.refreshToken, null);
+  assert.equal(account.idToken, null);
+  assert.equal(account.quota.geminiFiveHour.remainingPercent, null);
+  const serialized = summaryJson(summary);
+  assert.ok(!serialized.includes("ya29."));
+  assert.ok(!serialized.includes("GOCSPX"));
+});
+
+test("antigravity hides the agy CLI candidate when the CLI cannot list models", async (t) => {
+  const home = await mkdtemp(path.join(tmpdir(), "fuel-gauge-ag-home-"));
+  const root = await mkdtemp(path.join(tmpdir(), "fuel-gauge-ag-"));
+  t.after(async () => {
+    await rm(home, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  });
+  const env = process.env;
+  const previousHome = env.HOME;
+  env.HOME = home;
+  t.after(() => {
+    if (previousHome === undefined) delete env.HOME;
+    else env.HOME = previousHome;
+  });
+
+  const deps = makeTestRuntime(noNetwork, {
+    root,
+    subprocess: agySubprocess(new Error("spawn agy ENOENT")),
+  });
+  const provider = createAntigravityProvider(deps);
+  const candidates = await provider.discoverImports(signal());
+  assert.equal(
+    candidates.some((entry) => entry.source === "subprocess"),
+    false,
+  );
+
+  const notLoggedIn = createAntigravityProvider(
+    makeTestRuntime(noNetwork, {
+      root,
+      subprocess: agySubprocess({
+        stdout: "Fetching available models...\n",
+        stderr: "You are not logged into Antigravity.",
+      }),
+    }),
+  );
+  await assert.rejects(
+    notLoggedIn.import(
+      {
+        provider: "antigravity",
+        source: "subprocess",
+        label: "Antigravity CLI login (agy models)",
+        path: null,
+      },
+      signal(),
+    ),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, "NoCredentialFound");
+      assert.match((error as Error).message, /not logged in/);
+      return true;
+    },
+  );
+});
+
+const AGY_USAGE_OK = {
+  stdout: [
+    "Gemini Models\tWeekly Limit Remaining\t98.98%\t2026-09-27T11:26:52Z",
+    "Gemini Models\tFive Hour Limit Remaining\t96.78%\t2026-09-21T18:33:37Z",
+    "Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-09-28T13:43:50Z",
+    "Claude and GPT models\tFive Hour Limit Remaining\t100%\t2026-09-21T18:43:50Z",
+  ].join("\n"),
+};
+
+test("antigravity manual refresh fetches quota through agy /usage", async (t) => {
+  const home = await mkdtemp(path.join(tmpdir(), "fuel-gauge-ag-home-"));
+  const root = await mkdtemp(path.join(tmpdir(), "fuel-gauge-ag-"));
+  t.after(async () => {
+    await rm(home, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  });
+  const logDir = path.join(home, ".gemini", "antigravity-cli", "log");
+  await mkdir(logDir, { recursive: true });
+  await writeFile(
+    path.join(logDir, "cli-20260920_194015.log"),
+    AGY_LOG_LINE("first@example.com"),
+    "utf8",
+  );
+  const env = process.env;
+  const previousHome = env.HOME;
+  env.HOME = home;
+  t.after(() => {
+    if (previousHome === undefined) delete env.HOME;
+    else env.HOME = previousHome;
+  });
+
+  let usageCalls = 0;
+  let usageFails = false;
+  const subprocess: SubprocessPort = {
+    async run(command, args) {
+      if (command === "agy" && args[0] === "models") {
+        return { stdout: AGY_MODELS_OK.stdout, stderr: "" };
+      }
+      if (command === "agy" && args[0] === "-p" && args[1] === "/usage") {
+        usageCalls += 1;
+        if (usageFails) {
+          return {
+            stdout: "",
+            stderr: "You are not logged into Antigravity.",
+          };
+        }
+        return { stdout: AGY_USAGE_OK.stdout, stderr: "" };
+      }
+      throw new Error(`unexpected subprocess call: ${command}`);
+    },
+  };
+  const deps = makeTestRuntime(noNetwork, { root, subprocess });
+  const provider = createAntigravityProvider(deps);
+
+  // Import seeds presence only; quota arrives via manual refresh.
+  const candidates = await provider.discoverImports(signal());
+  const cli = candidates.find((entry) => entry.source === "subprocess");
+  if (cli == null) assert.fail("agy CLI candidate missing");
+  const imported = asAntigravitySummary((await provider.import(cli, signal()))[0]);
+  assert.equal(imported.email, "first@example.com");
+  assert.ok(
+    imported.metrics.every((metric) => metric.remainingPercent === null),
+  );
+  assert.equal(usageCalls, 0);
+
+  // Automatic passes must not touch the CLI account.
+  await provider.refreshAll(signal());
+  assert.equal(usageCalls, 0);
+
+  // Manual refresh parses the /usage panel into quota windows.
+  await provider.refreshAll(signal(), { manual: true });
+  assert.equal(usageCalls, 1);
+  const manual = asAntigravitySummary(
+    (await deps.store.list("antigravity"))[0],
+  );
+  assert.equal(manual.email, "first@example.com");
+  const byLabel = new Map(manual.metrics.map((m) => [m.label, m]));
+  assert.equal(byLabel.get("Gemini 5-hour")?.remainingPercent, 96.78);
+  assert.equal(byLabel.get("Gemini weekly")?.remainingPercent, 98.98);
+  assert.equal(
+    byLabel.get("Gemini 5-hour")?.resetAt,
+    Date.parse("2026-09-21T18:33:37Z"),
+  );
+  assert.notEqual(manual.usageUpdatedAt, null);
+
+  // A newer login in the logs is picked up on the next manual refresh.
+  await writeFile(
+    path.join(logDir, "cli-20260920_210000.log"),
+    AGY_LOG_LINE("second@example.com"),
+    "utf8",
+  );
+  usageFails = true;
+  const failed = asAntigravitySummary(
+    (await provider.refreshAll(signal(), { manual: true }))[0],
+  );
+  assert.equal(usageCalls, 2);
+  assert.match(failed.quotaQueryLastError ?? "", /not logged in/);
+});
+
+test("antigravity parses the last applyAuthResult from agy log text", () => {
+  assert.equal(parseAntigravityCliLogin("no auth here"), null);
+  const single = parseAntigravityCliLogin(AGY_LOG_LINE("a@example.com"));
+  assert.deepEqual(single, { email: "a@example.com", authMethod: "consumer" });
+  const relogin = parseAntigravityCliLogin(
+    `${AGY_LOG_LINE("a@example.com")}${AGY_LOG_LINE("b@example.com")}`,
+  );
+  assert.deepEqual(relogin, { email: "b@example.com", authMethod: "consumer" });
+});
+test("antigravity parses the agy /usage TSV panel", () => {
+  const quota = parseAntigravityUsageOutput(
+    [
+      "Gemini Models\tWeekly Limit Remaining\t98.98%\t2026-09-27T11:26:52Z",
+      "Gemini Models\tFive Hour Limit Remaining\t96.78%\t2026-09-21T18:33:37Z",
+      "Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-09-28T13:43:50Z",
+      "Claude and GPT models\tFive Hour Limit Remaining\t100%\t2026-09-21T18:43:50Z",
+      "Fetching available models...",
+      "surprise row\twithout\tpercent",
+    ].join("\n"),
+  );
+  assert.equal(quota.geminiWeekly.remainingPercent, 98.98);
+  assert.equal(quota.geminiWeekly.resetAt, Date.parse("2026-09-27T11:26:52Z"));
+  assert.equal(quota.geminiFiveHour.remainingPercent, 96.78);
+  assert.equal(quota.thirdPartyWeekly.remainingPercent, 100);
+  assert.equal(quota.thirdPartyFiveHour.remainingPercent, 100);
+
+  const empty = parseAntigravityUsageOutput("Fetching...\n");
+  assert.equal(empty.geminiWeekly.remainingPercent, null);
+  assert.equal(empty.thirdPartyFiveHour.resetAt, null);
+});
+
+test("agy client secret extraction splits concatenated tokens", () => {
+  const blob =
+    "noiseGOCSPX-firstcandidate0000000000000000GOCSPX-secondcandidate000000000000000tail";
+  assert.deepEqual(extractAgyClientSecrets(blob), [
+    "GOCSPX-firstcandidate0000000000000000",
+    "GOCSPX-secondcandidate000000000000000tail",
+  ]);
+  // Duplicates collapse and short bodies are binary noise, not tokens.
+  assert.deepEqual(
+    extractAgyClientSecrets(
+      "GOCSPX-duplicate0000000000000000GOCSPX-duplicate0000000000000000",
+    ),
+    ["GOCSPX-duplicate0000000000000000"],
+  );
+  assert.deepEqual(extractAgyClientSecrets("GOCSPX-abc"), []);
+  assert.deepEqual(extractAgyClientSecrets("GOCSPX-"), []);
+});
+
+test("token exchange rotates agy client secrets on invalid_client", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "fuel-gauge-ag-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await fakeAgyOnPath(t, [
+    "GOCSPX-wrongcandidate0000000000000000",
+    "GOCSPX-rightcandidate0000000000000000",
+  ]);
+  const tokenRequests: string[] = [];
+  const deps = makeTestRuntime(
+    async (input, init) => {
+      if (String(input) === GOOGLE_TOKEN_URL) {
+        tokenRequests.push(String(init?.body ?? ""));
+        if (tokenRequests.length === 1) {
+          return jsonResponse({ error: "invalid_client" }, 401);
+        }
+        return jsonResponse({
+          access_token: "rotated-access",
+          refresh_token: "rotated-refresh",
+          id_token: jwtWith({ email: "rotate@example.com", sub: "rot-1" }),
+          token_type: "Bearer",
+          expires_in: 3600,
+        });
+      }
+      throw new Error(`unexpected url ${String(input)}`);
+    },
+    {
+      root,
+      callbackServer: {
+        async start(options) {
+          return {
+            host: "127.0.0.1",
+            port: 1466,
+            baseUrl: "http://127.0.0.1:1466",
+            callbackUrl: "http://127.0.0.1:1466/oauth-callback",
+            expectedState: "state-1",
+            result: Promise.resolve({
+              code: "auth_code_2",
+              state: options.expectedState,
+              path: "/oauth-callback",
+              params: {},
+            }),
+            async cancel() {},
+            async close() {},
+          };
+        },
+      },
+    },
+  );
+  const provider = createAntigravityProvider(deps);
+  const flow = await provider.beginAuth(signal());
+  if (flow.mode !== "browserCallback") {
+    assert.fail("expected browserCallback flow");
+  }
+  const summaries = await flow.result;
+  assert.equal(summaries[0]?.provider, "antigravity");
+
+  assert.equal(tokenRequests.length, 2);
+  assert.equal(
+    new URLSearchParams(tokenRequests[0]).get("client_secret"),
+    "GOCSPX-wrongcandidate0000000000000000",
+  );
+  assert.equal(
+    new URLSearchParams(tokenRequests[1]).get("client_secret"),
+    "GOCSPX-rightcandidate0000000000000000",
+  );
+});
+
+test("oauth login fails with a clear error when agy is not installed", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "fuel-gauge-ag-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // PATH without any agy binary anywhere.
+  const emptyDir = await mkdtemp(path.join(tmpdir(), "fuel-gauge-empty-"));
+  t.after(() => rm(emptyDir, { recursive: true, force: true }));
+  const previous = process.env.PATH;
+  process.env.PATH = emptyDir;
+  t.after(() => {
+    process.env.PATH = previous;
+  });
+  const deps = makeTestRuntime(noNetwork, {
+    root,
+    callbackServer: {
+      async start(options) {
+        return {
+          host: "127.0.0.1",
+          port: 1466,
+          baseUrl: "http://127.0.0.1:1466",
+          callbackUrl: "http://127.0.0.1:1466/oauth-callback",
+          expectedState: options.expectedState,
+          result: Promise.resolve({
+            code: "auth_code_3",
+            state: options.expectedState,
+            path: "/oauth-callback",
+            params: {},
+          }),
+          async cancel() {},
+          async close() {},
+        };
+      },
+    },
+  });
+  const provider = createAntigravityProvider(deps);
+  const flow = await provider.beginAuth(signal());
+  if (flow.mode !== "browserCallback") {
+    assert.fail("expected browserCallback flow");
+  }
+  await assert.rejects(
+    () => flow.result,
+    /Antigravity OAuth token request failed: .*agy CLI/,
   );
 });

@@ -15,6 +15,7 @@ import {
   type QuotaMetric,
 } from "../core/types.js";
 import type { CachedProviderSummaries } from "../runtime.js";
+import { antigravityCliStaleText } from "./accounts-view.js";
 
 export interface NonInteractiveSnapshotProps {
   readonly summaries: CachedProviderSummaries;
@@ -106,6 +107,9 @@ function AccountSection({ account }: { readonly account: AccountSummary }) {
         <Text
           dimColor
         >{`    updated ${new Date(account.usageUpdatedAt).toISOString()}`}</Text>
+      )}
+      {antigravityCliStaleText(account, Date.now()) == null ? null : (
+        <Text color="yellow">{`    ⚠ ${antigravityCliStaleText(account, Date.now())}`}</Text>
       )}
       {account.quotaQueryLastError === null ? null : (
         <Text color="red">{`    last error: ${account.quotaQueryLastError}`}</Text>

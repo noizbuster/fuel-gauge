@@ -85,7 +85,10 @@ Never log or expose token values; tests assert their absence.
 `PROVIDER_ORDER`/`PROVIDER_LABELS` (`types.ts`) + factory registered in
 `index.ts` + stored/summary types + validation in `store.ts`. Adapters
 receive all dependencies via `RuntimeDependencies`; never import the
-runtime directly.
+runtime directly. `refreshAll(signal, { manual })` gets `manual: true`
+only on user-triggered `r`/`R`; the Antigravity CLI source (agy,
+token-free by design) skips automatic passes and fetches its quota
+only manually via `agy -p /usage`, with a staleness warning in the UI.
 
 **UI.** Ink only. Each route owns its `useInput` handler; global keys
 pause while a field or modal is focused. Every route must fit the
