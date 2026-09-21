@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdirSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { gjcAccountId } from "../../src/core/ids.js";
+import { gjcAccountId, md5Hex } from "../../src/core/ids.js";
 import {
   SubprocessError,
   type SubprocessPort,
@@ -14,7 +16,11 @@ import type {
   GjcAccountSummary,
   ImportCandidate,
 } from "../../src/core/types.js";
-import { createGjcProvider } from "../../src/providers/gjc.js";
+import {
+  gjcAgentDbPath,
+  gjcKeyFingerprints,
+  createGjcProvider,
+} from "../../src/providers/gjc.js";
 import {
   fixedClock,
   makeTestRuntime,
@@ -104,10 +110,12 @@ function gjcPort(
   listOutputs: string[],
   calls: GjcCall[],
   checkFailure: CheckFailure,
+  sanitized: { envRemove: readonly string[] | undefined }[],
 ): SubprocessPort {
   return {
     async run(command, args, options) {
       calls.push({ command, args: [...args] });
+      sanitized.push({ envRemove: options?.envRemove });
       if (options?.signal?.aborted) {
         throw new SubprocessError({
           code: "aborted",
@@ -166,16 +174,27 @@ async function makeProvider(
 ) {
   const root = await mkdtemp(path.join(tmpdir(), "fuel-gauge-gjc-"));
   const calls: GjcCall[] = [];
+  const sanitizedEnv: { envRemove: readonly string[] | undefined }[] = [];
+  // Pin GJC's agent dir into the sandbox so key-fingerprint reads can
+  // never touch the real ~/.gjc/agent/agent.db.
+  const previousAgentDir = process.env.GJC_CODING_AGENT_DIR;
+  process.env.GJC_CODING_AGENT_DIR = path.join(root, "agent");
   const runtime = makeTestRuntime(noNetwork, {
     root,
-    subprocess: gjcPort(listOutputs, calls, checkFailure),
+    subprocess: gjcPort(listOutputs, calls, checkFailure, sanitizedEnv),
     clock: fixedClock(),
   });
   return {
     calls,
+    sanitizedEnv,
     runtime,
     provider: createGjcProvider(runtime),
     async cleanup() {
+      if (previousAgentDir === undefined) {
+        delete process.env.GJC_CODING_AGENT_DIR;
+      } else {
+        process.env.GJC_CODING_AGENT_DIR = previousAgentDir;
+      }
       await rm(root, { recursive: true, force: true });
     },
   };
@@ -234,6 +253,12 @@ test("GJC discovery and import use the redacted CLI inventory", async (t) => {
     { command: "gjc", args: ["accounts", "check", "--json"] },
     { command: "gjc", args: ["accounts", "list", "--json"] },
   ]);
+  // Discovery and import both run the CLI; omp's agent-dir alias must never
+  // reach any of them or GJC reads omp's database instead of its own.
+  assert.equal(harness.sanitizedEnv.length, 3);
+  for (const options of harness.sanitizedEnv) {
+    assert.deepEqual(options.envRemove, ["PI_CODING_AGENT_DIR"]);
+  }
 });
 
 test("GJC duplicate identities remain individually importable", async (t) => {
@@ -382,4 +407,125 @@ test("GJC login stays owned by the GJC CLI", async (t) => {
   const harness = await makeProvider([]);
   t.after(harness.cleanup);
   await assert.rejects(harness.provider.beginAuth(signal()), /\/login.*gjc/);
+});
+
+test("gjc agent db path follows GJC_CODING_AGENT_DIR, never the omp alias", () => {
+  assert.equal(
+    gjcAgentDbPath({ GJC_CODING_AGENT_DIR: "/custom/agent" }),
+    "/custom/agent/agent.db",
+  );
+  // omp exports PI_CODING_AGENT_DIR for its own agent directory; honoring
+  // it would read omp's database instead of GJC's.
+  assert.equal(
+    gjcAgentDbPath({ PI_CODING_AGENT_DIR: "/omp/agent" }),
+    path.join(homedir(), ".gjc", "agent", "agent.db"),
+  );
+  assert.equal(
+    gjcAgentDbPath({}),
+    path.join(homedir(), ".gjc", "agent", "agent.db"),
+  );
+});
+
+test("gjc key fingerprints mirror gjc's own key resolution", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "fuel-gauge-gjc-fp-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const agentDir = path.join(root, "agent");
+  mkdirSync(agentDir, { recursive: true });
+  const database = new DatabaseSync(path.join(agentDir, "agent.db"));
+  database.exec(`
+    CREATE TABLE auth_credentials (
+      id INTEGER PRIMARY KEY,
+      provider TEXT NOT NULL,
+      credential_type TEXT NOT NULL,
+      data TEXT NOT NULL,
+      disabled_cause TEXT DEFAULT NULL,
+      identity_key TEXT DEFAULT NULL,
+      revision INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  const insert = database.prepare(
+    "INSERT INTO auth_credentials (id, provider, credential_type, data, disabled_cause) VALUES (?, ?, ?, ?, ?)",
+  );
+  insert.run(1, "zai", "api_key", JSON.stringify({ key: "literal-zai-key" }), null);
+  insert.run(2, "zai", "api_key", JSON.stringify({ key: "!config:zai" }), null);
+  insert.run(3, "xai", "api_key", JSON.stringify({ key: "XAI_TEST_KEY" }), null);
+  insert.run(4, "zai", "api_key", JSON.stringify({ key: "revoked-key" }), "revoked");
+  insert.run(5, "zai", "api_key", "not-json", null);
+  insert.run(6, "openai-codex", "oauth", JSON.stringify({ email: "me@x.y" }), null);
+  database.close();
+
+  const fingerprints = gjcKeyFingerprints(path.join(agentDir, "agent.db"), {
+    XAI_TEST_KEY: "resolved-env-key",
+  });
+  assert.equal(fingerprints.get(1), md5Hex("literal-zai-key"));
+  // `!` config references resolve inside gjc, not on disk.
+  assert.equal(fingerprints.has(2), false);
+  // Env-named keys fingerprint the resolved environment value.
+  assert.equal(fingerprints.get(3), md5Hex("resolved-env-key"));
+  // Disabled rows and unparseable payloads never fingerprint.
+  assert.equal(fingerprints.has(4), false);
+  assert.equal(fingerprints.has(5), false);
+  assert.equal(fingerprints.has(6), false);
+
+  const missing = gjcKeyFingerprints(path.join(root, "absent", "agent.db"), {});
+  assert.equal(missing.size, 0);
+});
+
+test("GJC api-key accounts carry a mergeable fingerprint, never the key", async (t) => {
+  const zaiKey = "269-zai-api-key-DO-NOT-LEAK-0000000001";
+  const output = accountsEnvelope([
+    accountRow({
+      id: "zai:stored:2",
+      credentialId: 2,
+      provider: "zai",
+      credentialKind: "api_key",
+      identityLabel: null,
+    }),
+    accountRow({
+      id: "zai:stored:3",
+      credentialId: 3,
+      provider: "zai",
+      credentialKind: "api_key",
+      identityLabel: null,
+    }),
+  ]);
+  // discovery + two imports each run `gjc accounts list`.
+  const harness = await makeProvider([output, output, output]);
+  t.after(harness.cleanup);
+  const agentDir = process.env.GJC_CODING_AGENT_DIR as string;
+  mkdirSync(agentDir, { recursive: true });
+  const database = new DatabaseSync(path.join(agentDir, "agent.db"));
+  database.exec(`
+    CREATE TABLE auth_credentials (
+      id INTEGER PRIMARY KEY,
+      provider TEXT NOT NULL,
+      credential_type TEXT NOT NULL,
+      data TEXT NOT NULL,
+      disabled_cause TEXT DEFAULT NULL
+    );
+  `);
+  const insert = database.prepare(
+    "INSERT INTO auth_credentials (id, provider, credential_type, data, disabled_cause) VALUES (?, ?, ?, ?, ?)",
+  );
+  insert.run(2, "zai", "api_key", JSON.stringify({ key: zaiKey }), null);
+  insert.run(3, "zai", "api_key", JSON.stringify({ key: "!config:zai" }), null);
+  database.close();
+
+  const candidates = await harness.provider.discoverImports(signal());
+  assert.equal(candidates.length, 2);
+  const summaries: GjcAccountSummary[] = [];
+  for (const candidate of candidates) {
+    const [value] = await harness.provider.import(candidate, signal());
+    summaries.push(asGjcSummary(value));
+  }
+
+  const [withKey, referenced] = summaries;
+  assert.ok(withKey != null && referenced != null);
+  assert.equal(withKey.keyFingerprint, md5Hex(zaiKey));
+  assert.equal(referenced.keyFingerprint, null);
+  const stored = await harness.runtime.store.listStored("gjc");
+  assert.ok(!summaryJson(stored).includes(zaiKey));
+  assert.ok(!summaryJson(summaries).includes(zaiKey));
 });

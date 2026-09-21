@@ -884,6 +884,10 @@ export function validateStoredAccount(
           record.identityLabel,
           "account.identityLabel",
         ),
+        keyFingerprint: expectNullableString(
+          record.keyFingerprint,
+          "account.keyFingerprint",
+        ),
         limits: validateOmpLimits(record.limits, "account.limits"),
       } satisfies StoredGjcAccount;
 
@@ -1679,6 +1683,7 @@ export function storedAccountToSummary(account: StoredAccount): AccountSummary {
         displayLabel: account.displayLabel,
         email: account.email,
         identityLabel: account.identityLabel,
+        keyFingerprint: account.keyFingerprint,
       };
       return finalizeSummary(summary, account);
     }
@@ -1851,6 +1856,7 @@ function mergeExistingAccount(
         ...merged,
         limits: merged.limits.length > 0 ? merged.limits : prior.limits,
         usageUpdatedAt: merged.usageUpdatedAt ?? prior.usageUpdatedAt,
+        keyFingerprint: merged.keyFingerprint ?? prior.keyFingerprint,
       };
     }
     case "opencode": {

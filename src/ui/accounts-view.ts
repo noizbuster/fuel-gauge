@@ -209,6 +209,7 @@ function mergeKeyOf(account: AccountSummary, index: number): string {
   if (
     (account.provider === "opencode" ||
       account.provider === "omp" ||
+      account.provider === "gjc" ||
       account.provider === "fuelGauge") &&
     account.keyFingerprint !== null
   ) {
@@ -251,6 +252,36 @@ function freshUsageAccounts(
  * the entries by distinct source count (most first), provider rank
  * breaking ties.
  */
+
+/** Age after which the agy CLI account's manually fetched quota warns. */
+export const ANTIGRAVITY_CLI_STALE_MS = 60 * 60 * 1000;
+
+/**
+ * Staleness warning text for the manual-refresh-only Antigravity CLI
+ * account, or null when its data is fresh. Callers append their own
+ * refresh hint ("press r" in the dashboard; none in the snapshot).
+ */
+export function antigravityCliStaleText(
+  account: AccountSummary,
+  nowMs: number,
+): string | null {
+  if (account.provider !== "antigravity") {
+    return null;
+  }
+  if (account.source !== "cli") {
+    return null;
+  }
+  if (account.usageUpdatedAt == null) {
+    return "quota not fetched yet (manual refresh)";
+  }
+  const ageMs = nowMs - account.usageUpdatedAt;
+  if (ageMs <= ANTIGRAVITY_CLI_STALE_MS) {
+    return null;
+  }
+  const ageHours = (ageMs / 3_600_000).toFixed(1);
+  return `quota data stale (${ageHours}h old)`;
+}
+
 export function mergeAccountsByIdentity(
   accounts: readonly AccountSummary[],
 ): MergedAccountEntry[] {

@@ -393,6 +393,14 @@ export interface StoredGjcAccount extends StoredAccountBase {
   email: string | null;
   /** Safe GJC identity label: email, account id, or project id. */
   identityLabel: string | null;
+  /**
+   * md5 digest of the api key GJC stores in its own `agent.db` — a
+   * non-secret fingerprint that lets the dashboard merge the same key
+   * imported through different agents. Computed locally without storing
+   * the key; `null` for oauth accounts, env/config-referenced keys, and
+   * unreadable GJC stores.
+   */
+  keyFingerprint: string | null;
   limits: OmpUsageLimit[];
 }
 
@@ -582,6 +590,8 @@ export interface GjcAccountSummary extends AccountSummaryBase {
   email: string | null;
   /** Safe GJC identity label: email, account id, or project id. */
   identityLabel: string | null;
+  /** md5 digest of GJC's stored api key; `null` when unavailable. */
+  keyFingerprint: string | null;
 }
 
 export interface OpenCodeAccountSummary extends AccountSummaryBase {

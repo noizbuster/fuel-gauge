@@ -4,8 +4,12 @@
  * store; Fuel Gauge persists only identity and normalized quota snapshots.
  */
 
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+
 import { asRecord } from "../core/discovery.js";
-import { gjcAccountId } from "../core/ids.js";
+import { gjcAccountId, md5Hex } from "../core/ids.js";
 import { SubprocessError } from "../core/subprocess.js";
 import type {
   AccountSummary,
@@ -19,6 +23,90 @@ import type { RuntimeDependencies } from "../runtime.js";
 import type { AuthFlow, ProviderAdapter } from "./provider.js";
 
 const ACCOUNTS_TIMEOUT_MS = 90_000;
+
+/**
+ * Variables stripped from the `gjc` child environment.
+ *
+ * omp exports `PI_CODING_AGENT_DIR` (its own agent directory, per profile),
+ * and GJC's path resolver reads that same name as the legacy alias of
+ * `GJC_CODING_AGENT_DIR`. Inheriting it therefore points every `gjc accounts`
+ * call at omp's `agent.db` — whose auth schema can be newer than the one GJC
+ * understands, failing the command outright ("no such column: revision").
+ * Stripping the alias leaves GJC resolving its own agent directory
+ * (`GJC_CODING_AGENT_DIR`, else `~/.gjc/agent`), which is the store the user
+ * actually logged into.
+ */
+const GJC_SANITIZED_ENV: readonly string[] = ["PI_CODING_AGENT_DIR"];
+
+/** Resolves GJC's credential database the way the `gjc` CLI itself does. */
+export function gjcAgentDbPath(env: NodeJS.ProcessEnv): string {
+  const override = env.GJC_CODING_AGENT_DIR?.trim();
+  // PI_CODING_AGENT_DIR is deliberately NOT honored: GJC treats it as a
+  // legacy alias of its own variable, so following it here would read
+  // omp's agent.db instead of the store the user logged into (the same
+  // trap GJC_SANITIZED_ENV defends the subprocess against).
+  const agentDir =
+    override != null && override !== ""
+      ? override
+      : join(homedir(), ".gjc", "agent");
+  return join(agentDir, "agent.db");
+}
+
+/**
+ * md5 fingerprints of GJC's stored api keys, keyed by credential row id.
+ *
+ * GJC's CLI inventory is payload-free by design, so identity-less api-key
+ * accounts (identityLabel null) carry nothing the dashboard could merge
+ * on. GJC does keep the raw key in `auth_credentials.data` of its own
+ * `agent.db`, though; reading it here — transiently, readonly, keeping
+ * only the non-secret md5 — yields the same fingerprint format omp and
+ * opencode already use, letting the same key merge across agents.
+ *
+ * Mirrors GJC's resolution semantics (auth-storage.ts): a `!`-prefixed
+ * key is a config reference GJC resolves itself (skipped — the value is
+ * not on disk), any other value resolves through the environment first
+ * and falls back to the stored literal. Every failure mode (missing
+ * database, migrated schema, locked file) yields an empty map: the
+ * fingerprint is best-effort and never blocks the CLI inventory.
+ */
+export function gjcKeyFingerprints(
+  dbPath: string,
+  env: NodeJS.ProcessEnv,
+): Map<number, string> {
+  const fingerprints = new Map<number, string>();
+  let database: DatabaseSync | undefined;
+  try {
+    database = new DatabaseSync(dbPath, { readOnly: true });
+    const statement = database.prepare(
+      "SELECT id, credential_type, data FROM auth_credentials WHERE disabled_cause IS NULL",
+    );
+    for (const row of statement.all()) {
+      const record = asRecord(row);
+      const id = record?.id;
+      if (record == null || typeof id !== "number" || !Number.isFinite(id)) {
+        continue;
+      }
+      if (record.credential_type !== "api_key") {
+        continue;
+      }
+      let key: unknown;
+      try {
+        key = asRecord(JSON.parse(String(record.data)))?.key;
+      } catch {
+        continue;
+      }
+      if (typeof key !== "string" || key === "" || key.startsWith("!")) {
+        continue;
+      }
+      fingerprints.set(id, md5Hex(env[key] ?? key));
+    }
+  } catch {
+    return new Map<number, string>();
+  } finally {
+    database?.close();
+  }
+  return fingerprints;
+}
 
 const IMPORT_ONLY_MESSAGE =
   "Accounts are managed by the gjc CLI. Log in with `/login` inside gjc, " +
@@ -51,12 +139,16 @@ const GJC_PROVIDER_NAMES: Record<string, string> = {
 
 interface GjcReport {
   sourceId: string;
+  /** Numeric `auth_credentials` row id; links the inventory row to agent.db. */
+  credentialId: number | null;
   gjcProviderId: string;
   credentialKind: GjcCredentialKind;
   credentialSource: GjcCredentialSource;
   displayLabel: string;
   email: string | null;
   identityLabel: string | null;
+  /** md5 of the stored api key when agent.db yields one; else `null`. */
+  keyFingerprint: string | null;
   limits: OmpUsageLimit[];
   usageFetchedAt: number | null;
   freshness: "fresh" | "stale-last-good" | null;
@@ -71,6 +163,26 @@ interface GjcInventorySnapshot {
 
 function finiteOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** Attaches agent.db key fingerprints to inventory rows by credential id. */
+function attachKeyFingerprints(reports: GjcReport[]): void {
+  const fingerprints = gjcKeyFingerprints(
+    gjcAgentDbPath(process.env),
+    process.env,
+  );
+  if (fingerprints.size === 0) {
+    return;
+  }
+  for (const report of reports) {
+    if (report.credentialKind !== "api_key" || report.credentialId === null) {
+      continue;
+    }
+    const fingerprint = fingerprints.get(report.credentialId);
+    if (fingerprint !== undefined) {
+      report.keyFingerprint = fingerprint;
+    }
+  }
 }
 
 function textOrNull(value: unknown): string | null {
@@ -218,6 +330,7 @@ function parseInventory(stdout: string): GjcReport[] {
       return [
         {
           sourceId,
+          credentialId: finiteOrNull(account?.credentialId),
           gjcProviderId,
           credentialKind,
           credentialSource,
@@ -225,6 +338,7 @@ function parseInventory(stdout: string): GjcReport[] {
           email: identityLabel?.includes("@") === true
             ? identityLabel.toLowerCase()
             : null,
+          keyFingerprint: null,
           limits: parseLimits(usageReport?.limits, gjcProviderId),
           usageFetchedAt:
             finiteOrNull(usage?.fetchedAt) ?? finiteOrNull(usageReport?.fetchedAt),
@@ -263,8 +377,11 @@ export function createGjcProvider(deps: RuntimeDependencies): ProviderAdapter {
     const result = await subprocess.run(binary, ["accounts", "list", "--json"], {
       timeoutMs: ACCOUNTS_TIMEOUT_MS,
       signal,
+      envRemove: GJC_SANITIZED_ENV,
     });
-    return parseInventory(result.stdout);
+    const reports = parseInventory(result.stdout);
+    attachKeyFingerprints(reports);
+    return reports;
   }
 
   async function runInventory(
@@ -278,7 +395,7 @@ export function createGjcProvider(deps: RuntimeDependencies): ProviderAdapter {
       await subprocess.run(
         binary,
         ["accounts", "check", ...(providerId == null ? [] : [providerId]), "--json"],
-        { timeoutMs: ACCOUNTS_TIMEOUT_MS, signal },
+        { timeoutMs: ACCOUNTS_TIMEOUT_MS, signal, envRemove: GJC_SANITIZED_ENV },
       );
     } catch (error) {
       if (signal.aborted) {
@@ -349,6 +466,7 @@ export function createGjcProvider(deps: RuntimeDependencies): ProviderAdapter {
       displayLabel: report.displayLabel,
       email: report.email,
       identityLabel: report.identityLabel,
+      keyFingerprint: report.keyFingerprint,
       limits: report.limits,
     };
   }

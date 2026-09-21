@@ -3,6 +3,8 @@ import test from "node:test";
 
 import type { AccountSummary, ProviderId } from "../../src/core/types.js";
 import {
+  antigravityCliStaleText,
+  ANTIGRAVITY_CLI_STALE_MS,
   markPinnedEntries,
   mergeAccountsByIdentity,
 } from "../../src/ui/accounts-view.js";
@@ -10,6 +12,7 @@ import {
 interface AccountSeed {
   id: string;
   provider: ProviderId;
+  source?: string;
   email?: string | null;
   keyFingerprint?: string | null;
   displayLabel?: string;
@@ -43,6 +46,27 @@ function summary(seed: AccountSeed): AccountSummary {
             },
           ],
   };
+  if (seed.provider === "antigravity") {
+    return {
+      ...base,
+      provider: "antigravity",
+      email: seed.email ?? "none@example.com",
+      source: seed.source ?? "cli",
+      authId: null,
+      name: null,
+      selectedAuthType: null,
+      projectId: null,
+      tierId: null,
+      planName: null,
+      credits: [],
+      quota: {
+        geminiFiveHour: { remainingPercent: null, resetAt: null },
+        geminiWeekly: { remainingPercent: null, resetAt: null },
+        thirdPartyFiveHour: { remainingPercent: null, resetAt: null },
+        thirdPartyWeekly: { remainingPercent: null, resetAt: null },
+      },
+    } as AccountSummary;
+  }
   if (seed.provider === "codex") {
     return {
       ...base,
@@ -79,11 +103,12 @@ function summary(seed: AccountSeed): AccountSummary {
       ...base,
       provider: "gjc",
       gjcProviderId: seed.id,
-      credentialKind: "oauth",
+      credentialKind: seed.keyFingerprint == null ? "oauth" : "api_key",
       credentialSource: "stored",
       displayLabel: seed.displayLabel ?? `GJC · ${seed.email ?? seed.id}`,
       email: seed.email ?? null,
       identityLabel: seed.email ?? null,
+      keyFingerprint: seed.keyFingerprint ?? null,
     } as AccountSummary;
   }
   return {
@@ -316,6 +341,22 @@ test("omp and opencode accounts sharing one api key merge", () => {
   assert.equal(entries[0]?.identityLabel, "API: z3d..f9z");
 });
 
+test("a gjc api-key fingerprint merges with the same key in other agents", () => {
+  const entries = mergeAccountsByIdentity([
+    summary({ id: "zai", provider: "opencode", keyFingerprint: "abc" }),
+    summary({ id: "zai", provider: "gjc", keyFingerprint: "abc" }),
+    summary({ id: "zai-other", provider: "gjc", keyFingerprint: null }),
+  ]);
+  assert.equal(entries.length, 2);
+  const merged = entries.find((entry) => entry.providers.length === 2);
+  assert.ok(merged != null);
+  assert.deepEqual(merged.providers, ["gjc", "opencode"]);
+  // The identity-less gjc row without a fingerprint never folds in.
+  const single = entries.find((entry) => entry.providers.length === 1);
+  assert.ok(single != null);
+  assert.deepEqual(single.providers, ["gjc"]);
+});
+
 test("metric rows carry the reset time of their worst member", () => {
   const entries = mergeAccountsByIdentity([
     summary({
@@ -478,4 +519,61 @@ test("duplicate account records use newest usage regardless of input order", () 
     assert.equal(entry?.accounts.length, 1);
     assert.equal(entry?.worstRemainingPercent, 75);
   }
+});
+
+test("antigravity CLI staleness warns only for old manual-only data", () => {
+  const now = 10 * 3_600_000;
+  const fresh = antigravityCliStaleText(
+    summary({
+      id: "ag",
+      provider: "antigravity",
+      source: "cli",
+      usageUpdatedAt: now - ANTIGRAVITY_CLI_STALE_MS + 1,
+    }),
+    now,
+  );
+  assert.equal(fresh, null);
+
+  const stale = antigravityCliStaleText(
+    summary({
+      id: "ag",
+      provider: "antigravity",
+      source: "cli",
+      usageUpdatedAt: now - 2 * 3_600_000,
+    }),
+    now,
+  );
+  assert.match(stale ?? "", /stale \(2\.0h old\)/);
+
+  const never = antigravityCliStaleText(
+    summary({
+      id: "ag",
+      provider: "antigravity",
+      source: "cli",
+      usageUpdatedAt: null,
+    }),
+    now,
+  );
+  assert.match(never ?? "", /not fetched yet/);
+
+  // OAuth-sourced and non-antigravity accounts never warn.
+  assert.equal(
+    antigravityCliStaleText(
+      summary({
+        id: "ag",
+        provider: "antigravity",
+        source: "oauth",
+        usageUpdatedAt: null,
+      }),
+      now,
+    ),
+    null,
+  );
+  assert.equal(
+    antigravityCliStaleText(
+      summary({ id: "cx", provider: "codex", usageUpdatedAt: 1 }),
+      now,
+    ),
+    null,
+  );
 });
