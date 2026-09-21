@@ -137,6 +137,25 @@ const GJC_PROVIDER_NAMES: Record<string, string> = {
   "xiaomi-token-plan": "Xiaomi Token Plan",
 };
 
+/**
+ * Canonical limit labels for gjc rows whose naming differs from every
+ * other source of the same quota. gjc calls Z.AI's windows "ZAI Request
+ * Quota"/"ZAI Token Quota" (window "Quota"), while omp, opencode, and
+ * the direct Z.AI API fetch (zai-quota.ts) all use the labels below.
+ * The accounts view merges rows by label, so without this remap the
+ * same quota reported by two sources renders as duplicate rows.
+ * Unknown ids keep gjc's own labels.
+ */
+const GJC_LIMIT_LABELS: Record<
+  string,
+  Record<string, { label: string; windowLabel: string }>
+> = {
+  zai: {
+    "zai:requests": { label: "ZAI Zread Quota", windowLabel: "Monthly" },
+    "zai:tokens": { label: "ZAI 5 Hours Token Quota", windowLabel: "5 Hours" },
+  },
+};
+
 interface GjcReport {
   sourceId: string;
   /** Numeric `auth_credentials` row id; links the inventory row to agent.db. */
@@ -241,11 +260,13 @@ function parseLimits(value: unknown, gjcProviderId: string): OmpUsageLimit[] {
       return [];
     }
     const window = asRecord(limit.window);
+    const canonical = GJC_LIMIT_LABELS[gjcProviderId]?.[id];
     return [
       {
         id: `gjc.${gjcProviderId}.${id}`,
-        label,
-        windowLabel: textOrNull(window?.label) ?? "",
+        label: canonical?.label ?? label,
+        windowLabel:
+          canonical?.windowLabel ?? textOrNull(window?.label) ?? "",
         remainingPercent: remainingPercent(amount),
         used: finiteOrNull(amount.used),
         total: finiteOrNull(amount.limit),

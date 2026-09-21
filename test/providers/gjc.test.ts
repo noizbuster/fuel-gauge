@@ -261,6 +261,72 @@ test("GJC discovery and import use the redacted CLI inventory", async (t) => {
   }
 });
 
+test("GJC ZAI limits carry the canonical labels other sources merge on", async (t) => {
+  // Real-world gjc naming: the same Z.AI quotas omp, opencode, and the
+  // direct API all call "ZAI Zread Quota"/"ZAI 5 Hours Token Quota" are
+  // reported as "ZAI Request Quota"/"ZAI Token Quota" (window "Quota").
+  // The accounts view merges rows by label, so these must be remapped.
+  const zaiUsage = {
+    provider: "zai",
+    fetchedAt: 1_700_000_100_000,
+    limits: [
+      {
+        id: "zai:requests",
+        label: "ZAI Request Quota",
+        window: { id: "1mo", label: "Quota", resetsAt: 1_700_100_000_000 },
+        amount: { unit: "percent", usedFraction: 0.01, remainingFraction: 0.99 },
+      },
+      {
+        id: "zai:tokens",
+        label: "ZAI Token Quota",
+        window: { id: "5h", label: "Quota", resetsAt: 1_700_020_000_000 },
+        amount: { unit: "percent", usedFraction: 0.03, remainingFraction: 0.97 },
+      },
+    ],
+  };
+  const output = accountsEnvelope([
+    accountRow({
+      id: "zai:stored:9",
+      credentialId: 9,
+      provider: "zai",
+      credentialKind: "api_key",
+      identityLabel: null,
+      usage: {
+        report: zaiUsage,
+        fetchedAt: 1_700_000_100_000,
+        freshUntil: 1_700_000_400_000,
+        retainUntil: 1_700_086_400_000,
+        freshness: "fresh",
+      },
+    }),
+  ]);
+  const harness = await makeProvider([output, output]);
+  t.after(harness.cleanup);
+
+  const candidates = await harness.provider.discoverImports(signal());
+  const [value] = await harness.provider.import(first(candidates), signal());
+  const summary = asGjcSummary(value);
+  assert.deepEqual(
+    summary.metrics.map((metric) => ({
+      id: metric.id,
+      label: metric.label,
+      resetAt: metric.resetAt,
+    })),
+    [
+      {
+        id: "gjc.zai.zai:requests",
+        label: "ZAI Zread Quota (Monthly)",
+        resetAt: 1_700_100_000_000,
+      },
+      {
+        id: "gjc.zai.zai:tokens",
+        label: "ZAI 5 Hours Token Quota",
+        resetAt: 1_700_020_000_000,
+      },
+    ],
+  );
+});
+
 test("GJC duplicate identities remain individually importable", async (t) => {
   const output = accountsEnvelope([
     accountRow({ id: "openai-codex:stored:1", credentialId: 1 }),
