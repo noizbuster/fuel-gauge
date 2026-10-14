@@ -135,10 +135,7 @@ export function ompAccountId(
 }
 
 /** `gjc_` + md5 of `{GJC provider id}:{safe inventory row id}`. */
-export function gjcAccountId(
-  gjcProviderId: string,
-  sourceId: string,
-): string {
+export function gjcAccountId(gjcProviderId: string, sourceId: string): string {
   return `gjc_${md5Hex(`${gjcProviderId.trim()}:${sourceId.trim()}`)}`;
 }
 

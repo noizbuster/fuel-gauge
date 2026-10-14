@@ -17,9 +17,9 @@ import type {
   ImportCandidate,
 } from "../../src/core/types.js";
 import {
+  createGjcProvider,
   gjcAgentDbPath,
   gjcKeyFingerprints,
-  createGjcProvider,
 } from "../../src/providers/gjc.js";
 import {
   fixedClock,
@@ -274,13 +274,21 @@ test("GJC ZAI limits carry the canonical labels other sources merge on", async (
         id: "zai:requests",
         label: "ZAI Request Quota",
         window: { id: "1mo", label: "Quota", resetsAt: 1_700_100_000_000 },
-        amount: { unit: "percent", usedFraction: 0.01, remainingFraction: 0.99 },
+        amount: {
+          unit: "percent",
+          usedFraction: 0.01,
+          remainingFraction: 0.99,
+        },
       },
       {
         id: "zai:tokens",
         label: "ZAI Token Quota",
         window: { id: "5h", label: "Quota", resetsAt: 1_700_020_000_000 },
-        amount: { unit: "percent", usedFraction: 0.03, remainingFraction: 0.97 },
+        amount: {
+          unit: "percent",
+          usedFraction: 0.03,
+          remainingFraction: 0.97,
+        },
       },
     ],
   };
@@ -514,12 +522,36 @@ test("gjc key fingerprints mirror gjc's own key resolution", async (t) => {
   const insert = database.prepare(
     "INSERT INTO auth_credentials (id, provider, credential_type, data, disabled_cause) VALUES (?, ?, ?, ?, ?)",
   );
-  insert.run(1, "zai", "api_key", JSON.stringify({ key: "literal-zai-key" }), null);
+  insert.run(
+    1,
+    "zai",
+    "api_key",
+    JSON.stringify({ key: "literal-zai-key" }),
+    null,
+  );
   insert.run(2, "zai", "api_key", JSON.stringify({ key: "!config:zai" }), null);
-  insert.run(3, "xai", "api_key", JSON.stringify({ key: "XAI_TEST_KEY" }), null);
-  insert.run(4, "zai", "api_key", JSON.stringify({ key: "revoked-key" }), "revoked");
+  insert.run(
+    3,
+    "xai",
+    "api_key",
+    JSON.stringify({ key: "XAI_TEST_KEY" }),
+    null,
+  );
+  insert.run(
+    4,
+    "zai",
+    "api_key",
+    JSON.stringify({ key: "revoked-key" }),
+    "revoked",
+  );
   insert.run(5, "zai", "api_key", "not-json", null);
-  insert.run(6, "openai-codex", "oauth", JSON.stringify({ email: "me@x.y" }), null);
+  insert.run(
+    6,
+    "openai-codex",
+    "oauth",
+    JSON.stringify({ email: "me@x.y" }),
+    null,
+  );
   database.close();
 
   const fingerprints = gjcKeyFingerprints(path.join(agentDir, "agent.db"), {

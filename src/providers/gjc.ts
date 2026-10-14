@@ -256,7 +256,12 @@ function parseLimits(value: unknown, gjcProviderId: string): OmpUsageLimit[] {
     const id = textOrNull(limit?.id);
     const label = textOrNull(limit?.label);
     const amount = asRecord(limit?.amount);
-    if (limit === undefined || id === null || label === null || amount === undefined) {
+    if (
+      limit === undefined ||
+      id === null ||
+      label === null ||
+      amount === undefined
+    ) {
       return [];
     }
     const window = asRecord(limit.window);
@@ -265,8 +270,7 @@ function parseLimits(value: unknown, gjcProviderId: string): OmpUsageLimit[] {
       {
         id: `gjc.${gjcProviderId}.${id}`,
         label: canonical?.label ?? label,
-        windowLabel:
-          canonical?.windowLabel ?? textOrNull(window?.label) ?? "",
+        windowLabel: canonical?.windowLabel ?? textOrNull(window?.label) ?? "",
         remainingPercent: remainingPercent(amount),
         used: finiteOrNull(amount.used),
         total: finiteOrNull(amount.limit),
@@ -290,7 +294,8 @@ function parseCredentialSource(value: unknown): GjcCredentialSource | null {
 }
 
 function baseDisplayLabel(report: Omit<GjcReport, "displayLabel">): string {
-  const providerName = GJC_PROVIDER_NAMES[report.gjcProviderId] ?? report.gjcProviderId;
+  const providerName =
+    GJC_PROVIDER_NAMES[report.gjcProviderId] ?? report.gjcProviderId;
   const identity =
     report.identityLabel ??
     (report.credentialKind === "api_key" ? "API key" : "OAuth account");
@@ -320,7 +325,8 @@ function parseInventory(stdout: string): GjcReport[] {
   try {
     parsed = JSON.parse(stdout);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "unknown parse error";
+    const message =
+      error instanceof Error ? error.message : "unknown parse error";
     throw new Error(`gjc accounts output is not valid JSON: ${message}`);
   }
   const root = asRecord(parsed);
@@ -356,13 +362,15 @@ function parseInventory(stdout: string): GjcReport[] {
           credentialKind,
           credentialSource,
           identityLabel,
-          email: identityLabel?.includes("@") === true
-            ? identityLabel.toLowerCase()
-            : null,
+          email:
+            identityLabel?.includes("@") === true
+              ? identityLabel.toLowerCase()
+              : null,
           keyFingerprint: null,
           limits: parseLimits(usageReport?.limits, gjcProviderId),
           usageFetchedAt:
-            finiteOrNull(usage?.fetchedAt) ?? finiteOrNull(usageReport?.fetchedAt),
+            finiteOrNull(usage?.fetchedAt) ??
+            finiteOrNull(usageReport?.fetchedAt),
           freshness:
             usage?.freshness === "fresh"
               ? "fresh"
@@ -395,11 +403,15 @@ export function createGjcProvider(deps: RuntimeDependencies): ProviderAdapter {
     binary: string,
     signal: AbortSignal,
   ): Promise<GjcReport[]> {
-    const result = await subprocess.run(binary, ["accounts", "list", "--json"], {
-      timeoutMs: ACCOUNTS_TIMEOUT_MS,
-      signal,
-      envRemove: GJC_SANITIZED_ENV,
-    });
+    const result = await subprocess.run(
+      binary,
+      ["accounts", "list", "--json"],
+      {
+        timeoutMs: ACCOUNTS_TIMEOUT_MS,
+        signal,
+        envRemove: GJC_SANITIZED_ENV,
+      },
+    );
     const reports = parseInventory(result.stdout);
     attachKeyFingerprints(reports);
     return reports;
@@ -415,8 +427,17 @@ export function createGjcProvider(deps: RuntimeDependencies): ProviderAdapter {
     try {
       await subprocess.run(
         binary,
-        ["accounts", "check", ...(providerId == null ? [] : [providerId]), "--json"],
-        { timeoutMs: ACCOUNTS_TIMEOUT_MS, signal, envRemove: GJC_SANITIZED_ENV },
+        [
+          "accounts",
+          "check",
+          ...(providerId == null ? [] : [providerId]),
+          "--json",
+        ],
+        {
+          timeoutMs: ACCOUNTS_TIMEOUT_MS,
+          signal,
+          envRemove: GJC_SANITIZED_ENV,
+        },
       );
     } catch (error) {
       if (signal.aborted) {
@@ -504,7 +525,9 @@ export function createGjcProvider(deps: RuntimeDependencies): ProviderAdapter {
   }
 
   async function summaryOf(accountId: string): Promise<AccountSummary> {
-    const summary = (await store.list("gjc")).find((entry) => entry.id === accountId);
+    const summary = (await store.list("gjc")).find(
+      (entry) => entry.id === accountId,
+    );
     if (summary === undefined) {
       throw new Error("gjc account is missing from the private store");
     }
@@ -515,7 +538,9 @@ export function createGjcProvider(deps: RuntimeDependencies): ProviderAdapter {
     return store.list("gjc");
   }
 
-  async function discoverImports(signal: AbortSignal): Promise<ImportCandidate[]> {
+  async function discoverImports(
+    signal: AbortSignal,
+  ): Promise<ImportCandidate[]> {
     try {
       // Discovery is cache-only: do not make GJC read credentials or call
       // provider APIs until the user confirms an import.

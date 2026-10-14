@@ -1123,7 +1123,6 @@ export function createAntigravityProvider(
     }
   }
 
-
   /**
    * CLI accounts hold no tokens by design: manual refresh asks the
    * CLI for its own quota panel (`agy -p /usage` — a client-side
@@ -1139,9 +1138,7 @@ export function createAntigravityProvider(
     } catch (error) {
       return recordRefreshError(
         account,
-        error instanceof DiscoveryError
-          ? error.message
-          : errorMessage(error),
+        error instanceof DiscoveryError ? error.message : errorMessage(error),
       );
     }
     const login = await readAgyCliLogin(signal);
@@ -1171,15 +1168,11 @@ export function createAntigravityProvider(
     let stdout: string;
     let stderr: string;
     try {
-      const result = await subprocess.run(
-        AGY_COMMAND,
-        ["-p", "/usage"],
-        {
-          timeoutMs: AGY_USAGE_TIMEOUT_MS,
-          signal,
-          cwd: homedir(),
-        },
-      );
+      const result = await subprocess.run(AGY_COMMAND, ["-p", "/usage"], {
+        timeoutMs: AGY_USAGE_TIMEOUT_MS,
+        signal,
+        cwd: homedir(),
+      });
       stdout = result.stdout;
       stderr = result.stderr;
     } catch (error) {

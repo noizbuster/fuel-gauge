@@ -43,7 +43,7 @@ const ANSI_PATTERN = new RegExp(
 function stripAnsi(text: string): string {
   return text.replace(ANSI_PATTERN, "");
 }
-test("@inkjs/ui companion controls render with Ink 7 and React 19", async () => {
+test("@inkjs/ui companion controls render with Ink 8 and React 19", async () => {
   const view = render(<CompanionControls />);
 
   try {

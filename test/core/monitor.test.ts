@@ -552,11 +552,7 @@ test("refresh passes manual=true only on user-triggered r/R", async () => {
     manual.advance(200_000);
     await controller.refreshSelected("claude");
     await settle();
-    assert.deepEqual(
-      calls.refreshManualFlags,
-      [false, true],
-      "r is manual",
-    );
+    assert.deepEqual(calls.refreshManualFlags, [false, true], "r is manual");
 
     manual.advance(200_000);
     await controller.refreshAll();

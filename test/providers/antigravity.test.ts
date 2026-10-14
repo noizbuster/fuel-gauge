@@ -4,12 +4,12 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import type { SubprocessPort } from "../../src/core/subprocess.js";
 import type {
   AccountSummary,
   AntigravityAccountSummary,
   StoredAntigravityAccount,
 } from "../../src/core/types.js";
-import type { SubprocessPort } from "../../src/core/subprocess.js";
 import {
   applyAntigravityTokenResponseForTest,
   buildAntigravityCodeAssistHeaders,
@@ -17,9 +17,9 @@ import {
   buildAntigravityOAuthStart,
   createAntigravityProvider,
   extractAgyClientSecrets,
+  parseAntigravityCliLogin,
   parseAntigravityCodeAssistResponse,
   parseAntigravityLoadStatus,
-  parseAntigravityCliLogin,
   parseAntigravityQuota,
   parseAntigravityUsageOutput,
 } from "../../src/providers/antigravity.js";
@@ -792,18 +792,22 @@ function agySubprocess(
       if (command !== "agy") {
         throw new Error(`unexpected subprocess call: ${command}`);
       }
-      const behavior = args[0] === "-p" && args[1] === "/usage" ? usage : models;
+      const behavior =
+        args[0] === "-p" && args[1] === "/usage" ? usage : models;
       if (args[0] === "models" || (args[0] === "-p" && args[1] === "/usage")) {
         if (behavior instanceof Error) throw behavior;
         return { stdout: behavior.stdout, stderr: behavior.stderr ?? "" };
       }
-      throw new Error(`unexpected subprocess call: ${command} ${args.join(" ")}`);
+      throw new Error(
+        `unexpected subprocess call: ${command} ${args.join(" ")}`,
+      );
     },
   };
 }
 
 const AGY_MODELS_OK = {
-  stdout: "Fetching available models...\ngemini-3-pro-high\tGemini 3 Pro (High)\n",
+  stdout:
+    "Fetching available models...\ngemini-3-pro-high\tGemini 3 Pro (High)\n",
 };
 
 const AGY_LOG_LINE = (email: string) =>
@@ -973,7 +977,9 @@ test("antigravity manual refresh fetches quota through agy /usage", async (t) =>
   const candidates = await provider.discoverImports(signal());
   const cli = candidates.find((entry) => entry.source === "subprocess");
   if (cli == null) assert.fail("agy CLI candidate missing");
-  const imported = asAntigravitySummary((await provider.import(cli, signal()))[0]);
+  const imported = asAntigravitySummary(
+    (await provider.import(cli, signal()))[0],
+  );
   assert.equal(imported.email, "first@example.com");
   assert.ok(
     imported.metrics.every((metric) => metric.remainingPercent === null),

@@ -574,16 +574,119 @@ function stripAnsi(text) {
   return text.replace(/\x1B(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07]*\x07|\x07)/g, "");
 }
 
-/** Visible line count of the last complete synchronized frame. */
-function frameLineCount(raw) {
-  const begin = raw.lastIndexOf("\x1b[?2026h");
-  const end = raw.indexOf("\x1b[?2026l", begin < 0 ? 0 : begin);
-  const body = begin < 0 ? raw : end < 0 ? raw.slice(begin) : raw.slice(begin, end);
-  const lines = stripAnsi(body).replace(/\r/g, "").split("\n");
-  while (lines.length > 0 && lines[lines.length - 1] === "") {
-    lines.pop();
-  }
-  return lines.length;
+/**
+ * Minimal VT compositor. Ink 8's incremental renderer skips unchanged
+ * line prefixes, so one synchronized frame may carry only a line's
+ * changed tail (e.g. `[30G[K: abc..xyz`). Replaying the cursor-control
+ * sequences Ink emits (CHA/CUU/CNL/CUP/EL/ED, CR, LF) composites every
+ * delta into the true visible screen; a snapshot is taken at each
+ * synchronized-update end (`CSI ?2026 l`). Column accounting is one
+ * cell per character, matching Ink's width model for the glyphs this
+ * app renders.
+ */
+function createScreenCompositor() {
+  const lines = [];
+  let row = 0;
+  let col = 0;
+  let snapshot = "";
+
+  const ensureRow = (target) => {
+    while (lines.length <= target) lines.push([]);
+  };
+
+  const writeText = (text) => {
+    ensureRow(row);
+    const line = lines[row];
+    for (let i = 0; i < text.length; i += 1) {
+      const at = col + i;
+      while (line.length < at) line.push(" ");
+      line[at] = text[i];
+    }
+    col += text.length;
+  };
+
+  const eraseLine = (mode) => {
+    ensureRow(row);
+    const line = lines[row];
+    if (mode === 1) {
+      for (let i = 0; i <= col && i < line.length; i += 1) line[i] = " ";
+    } else if (mode === 2) {
+      lines[row] = [];
+    } else {
+      line.length = col;
+    }
+  };
+
+  const eraseDisplay = (mode) => {
+    if (mode === 2 || mode === 3) {
+      lines.length = 0;
+      row = 0;
+      col = 0;
+      return;
+    }
+    ensureRow(row);
+    lines[row].length = col;
+    for (let r = row + 1; r < lines.length; r += 1) lines[r].length = 0;
+  };
+
+  const serialize = () => {
+    const visible = lines.map((line) => line.join("").replace(/[ \t]+$/, ""));
+    while (visible.length > 0 && visible[visible.length - 1] === "") visible.pop();
+    return visible.join("\n");
+  };
+
+  const applyCsi = (seq) => {
+    const params = seq.slice(2, -1);
+    const final = seq.at(-1);
+    if (params.startsWith("?")) {
+      if (final === "l" && params.slice(1).split(";").includes("2026")) {
+        snapshot = serialize();
+      }
+      return;
+    }
+    const parts = params.split(";");
+    const n = (index, dflt) => {
+      const value = Number.parseInt(parts[index] ?? "", 10);
+      return Number.isNaN(value) ? dflt : value;
+    };
+    if (final === "A") row = Math.max(0, row - n(0, 1));
+    else if (final === "B" || final === "e") row += n(0, 1);
+    else if (final === "C" || final === "a") col += n(0, 1);
+    else if (final === "D") col = Math.max(0, col - n(0, 1));
+    else if (final === "E") {
+      row += n(0, 1);
+      col = 0;
+    } else if (final === "F") {
+      row = Math.max(0, row - n(0, 1));
+      col = 0;
+    } else if (final === "G" || final === "`") col = Math.max(0, n(0, 1) - 1);
+    else if (final === "H" || final === "f") {
+      row = Math.max(0, n(0, 1) - 1);
+      col = Math.max(0, n(1, 1) - 1);
+    } else if (final === "J") eraseDisplay(n(0, 0));
+    else if (final === "K") eraseLine(n(0, 0));
+  };
+
+  const token = /(\x1b\[[0-9;?]*[@-~])|(\r)|(\n)|([^\x1b\r\n]+)/g;
+  return {
+    feed(chunk) {
+      for (const match of chunk.matchAll(token)) {
+        if (match[1]) applyCsi(match[1]);
+        else if (match[2]) col = 0;
+        else if (match[3]) row += 1;
+        else writeText(match[4]);
+      }
+    },
+    /** Composited screen at the last completed synchronized frame. */
+    frameText() {
+      return snapshot === "" ? serialize() : snapshot;
+    },
+    /** Occupied screen rows of that frame (trailing blanks trimmed). */
+    frameRows() {
+      const state = this.frameText();
+      return state === "" ? 0 : state.split("\n").length;
+    },
+  };
 }
 
 /** Deterministic injectable clock with tracked intervals. */
@@ -746,15 +849,18 @@ async function startHarness(options = {}) {
   const stdout = new FakeStdout(options.columns ?? 80, options.rows ?? 24);
   const stdin = new FakeStdin();
   let output = "";
+  const screenState = createScreenCompositor();
   stdout.on("data", (chunk) => {
-    output += chunk.toString("utf8");
+    const text = chunk.toString("utf8");
+    output += text;
+    screenState.feed(text);
     // Kitty auto-negotiation: answer the capability query as a level-0
     // (non-kitty) terminal so `kittyKeyboard: { mode: "auto" }` parses
     // every keystroke exactly once, exactly like a real terminal. The
     // reply is pushed without an artificial delay: a delayed reply lets
     // test keystrokes race into ink's detection buffer, which then
     // unshift-replays them (a double-delivery artifact).
-    if (chunk.toString("utf8").includes("\x1b[?u")) {
+    if (text.includes("\x1b[?u")) {
       process.nextTick(() => {
         stdin.push(Buffer.from("\x1b[?0u", "utf8"));
       });
@@ -799,20 +905,15 @@ async function startHarness(options = {}) {
     rawOutput: () => output,
     mark: () => output.length,
     since: (mark) => stripAnsi(output.slice(mark)),
-    /** The last complete frame, whitespace-normalized (wrap-safe asserts). */
+    /** The composited screen at the last complete frame, whitespace-normalized (wrap-safe asserts). */
     frameText() {
-      const begin = output.lastIndexOf("\x1b[?2026h");
-      const body =
-        begin < 0
-          ? output
-          : (() => {
-              const end = output.indexOf("\x1b[?2026l", begin);
-              return end < 0 ? output.slice(begin) : output.slice(begin, end);
-            })();
-      return stripAnsi(body)
+      return screenState
+        .frameText()
         .replace(/[│╭╮╰╯─┌┐└┘═║]/g, " ")
         .replace(/\s+/g, " ");
     },
+    /** Occupied screen rows at the last complete frame. */
+    frameRows: () => screenState.frameRows(),
     key: (bytes) => stdin.key(bytes),
     resize: (columns, rows) => stdout.resize(columns, rows),
     // Predicates may be sync or async; both are awaited before polling.
@@ -878,7 +979,7 @@ test("height budget keeps the dashboard inside the viewport; labels survive ever
       fuelGauge: "Z.AI Coding Plan · API: abc..xyz",
     };
     const allIdentities = Object.values(identities);
-    const lineCount = () => frameLineCount(harness.rawOutput());
+    const lineCount = () => harness.frameRows();
     const fits = (rows) => lineCount() < rows;
 
     // 80x24 (default): the frame stays UNDER the viewport height — Ink
@@ -953,7 +1054,7 @@ test("state updates at 80x24, 80x10, and 100x30 repaint incrementally — never 
   t.after(() => rm(harness.root, { recursive: true, force: true }));
   const countClears = (mark) =>
     (harness.rawOutput().slice(mark).match(/\x1b\[2J/g) ?? []).length;
-  const fits = (rows) => frameLineCount(harness.rawOutput()) < rows;
+  const fits = (rows) => harness.frameRows() < rows;
   try {
     // Let the startup refresh settle: its transitions belong to the
     // monitor suite, not this invariant. The v switch happens AFTER the
@@ -1007,7 +1108,7 @@ test("state updates at 80x24, 80x10, and 100x30 repaint incrementally — never 
     await harness.waitFor(
       () =>
         harness.frameText().includes("codex@example.com") &&
-        frameLineCount(harness.rawOutput()) < 10,
+        harness.frameRows() < 10,
       "short 80x10 frame shows the selected source's accounts and fits",
     );
     mark = harness.mark();
@@ -1097,7 +1198,7 @@ test("every route fits the viewport and stable updates never full-clear", { time
   // waits read the CUMULATIVE screen with route-unique phrases.
   const countClears = (mark) =>
     (harness.rawOutput().slice(mark).match(/\x1b\[2J/g) ?? []).length;
-  const fits = (rows) => frameLineCount(harness.rawOutput()) < rows;
+  const fits = (rows) => harness.frameRows() < rows;
   let mark = 0;
   try {
     // Sources-view keyboard model (j provider nav, Enter = details).
@@ -1125,7 +1226,7 @@ test("every route fits the viewport and stable updates never full-clear", { time
     assert.equal(countClears(mark), 0, "settings toggle is zero-clear");
     harness.key(ESC);
     await sleep(400);
-    assert.ok(fits(24), `dashboard fits after settings (got ${frameLineCount(harness.rawOutput())})`);
+    assert.ok(fits(24), `dashboard fits after settings (got ${harness.frameRows()})`);
 
     // Auth (merged key management): heading, hint, and rows fit;
     // navigation is zero-clear.
@@ -1186,7 +1287,7 @@ test("every route fits the viewport and stable updates never full-clear", { time
     await harness.waitFor(
       () =>
         harness.screen().includes("Auto refresh:") &&
-        frameLineCount(harness.rawOutput()) < 10,
+        harness.frameRows() < 10,
       "settings fits at 80x10",
     );
     mark = harness.mark();
@@ -1199,7 +1300,7 @@ test("every route fits the viewport and stable updates never full-clear", { time
     await harness.waitFor(
       () =>
         harness.screen().includes("+ add account") &&
-        frameLineCount(harness.rawOutput()) < 10,
+        harness.frameRows() < 10,
       "auth management route fits at 80x10",
     );
     mark = harness.mark();
@@ -1504,7 +1605,7 @@ test("auth start then Esc closes the fake listener and cancels exactly once", { 
     // The 1s expiry countdown repaints this route forever: every tick
     // must be an incremental update, never a full-screen clear.
     assert.ok(
-      frameLineCount(harness.rawOutput()) < 24,
+      harness.frameRows() < 24,
       "auth route fits at 80x24",
     );
     const tickMark = harness.mark();

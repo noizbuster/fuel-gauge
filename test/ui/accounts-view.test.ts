@@ -3,8 +3,8 @@ import test from "node:test";
 
 import type { AccountSummary, ProviderId } from "../../src/core/types.js";
 import {
-  antigravityCliStaleText,
   ANTIGRAVITY_CLI_STALE_MS,
+  antigravityCliStaleText,
   markPinnedEntries,
   mergeAccountsByIdentity,
 } from "../../src/ui/accounts-view.js";
